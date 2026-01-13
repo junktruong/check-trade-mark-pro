@@ -6,7 +6,6 @@ import { callTMHunt } from "@/lib/tmhunt";
 function norm(s: any) {
   return String(s ?? "").toLowerCase().trim();
 }
-
 function uniq(arr: string[]) {
   return Array.from(new Set(arr));
 }
@@ -25,18 +24,19 @@ export async function POST(req: Request) {
     const allow = (await AllowWord.find({}).lean()).map((x: any) => norm(x.value));
     const deny = (await BlockWord.find({}).lean()).map((x: any) => norm(x.value));
 
-    // 2) check deny list (blocklist)
-    const denyHit = uniq(deny.filter((w : any) => w && text.includes(w)));
+    // 2) deny list check
+    const denyHit = uniq(deny.filter((w) => w && text.includes(w)));
 
     if (denyHit.length > 0) {
-      // optional: update stats (nếu muốn)
+      // optional: tăng hitCount + lastSeenAt (không bắt buộc)
+      const now = new Date();
       await BlockWord.bulkWrite(
         denyHit.map((w) => ({
           updateOne: {
             filter: { value: w },
             update: {
-              $set: { source: "manual" },
-              $setOnInsert: { value: w, createdAt: new Date() },
+              $setOnInsert: { value: w, source: "manual", createdAt: now },
+              $set: { lastSeenAt: now }, // ✅ không set source ở đây để khỏi conflict
               $inc: { hitCount: 1 },
             },
             upsert: true,
@@ -52,10 +52,10 @@ export async function POST(req: Request) {
       });
     }
 
-    // 3) call TMHunt
+    // 3) TMHunt
     const tm = await callTMHunt(text);
 
-    // tm.liveMarks có thể là string[] hoặc array dạng phức tạp => normalize kiểu an toàn
+    // normalize liveMarks
     const liveMarksRaw: string[] = Array.isArray(tm?.liveMarks)
       ? tm.liveMarks.map((x: any) => (typeof x === "string" ? x : x?.[1] ?? x?.wordmark ?? x?.mark ?? ""))
       : [];
@@ -66,15 +66,16 @@ export async function POST(req: Request) {
     const filtered = liveMarks.filter((m) => !allow.includes(m));
 
     if (filtered.length > 0) {
-      // ✅ lưu từng từ cấm vào DB (upsert nhiều doc)
       const now = new Date();
+
+      // ✅ lưu từng từ vào DB, không conflict field source
       await BlockWord.bulkWrite(
         filtered.map((w) => ({
           updateOne: {
             filter: { value: w },
             update: {
               $setOnInsert: { value: w, source: "tmhunt", createdAt: now },
-              $set: { lastSeenAt: now, source: "tmhunt" },
+              $set: { lastSeenAt: now }, // ✅ bỏ source ở $set
               $inc: { hitCount: 1 },
             },
             upsert: true,
