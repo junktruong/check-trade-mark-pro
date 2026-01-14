@@ -45,23 +45,35 @@ async function geminiPolicyCheck(row: any) {
   const model = process.env.GEMINI_TEXT_MODEL || "gemini-2.5-flash-preview-09-2025";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-  const prompt = `You are an Amazon Merch on Demand compliance reviewer.
+  const prompt = `You are a strict **Amazon Merch on Demand Compliance Reviewer**.
+Your task is to review the following listing text (Title, Bullets, Description) and flag ANY potential violations of Amazon's Content Policies.
 
-Check whether the following listing text violates Amazon Merch on Demand policies.
-Return STRICT JSON ONLY (no markdown).
 
-Policies summary:
-- No trademarks/copyrighted brand names or slogans.
-- No hate, harassment, violence, drugs, adult content.
-- No misleading claims, medical claims, guarantees.
-- Avoid references to real brands, celebrities, movies, games, TV shows unless clearly generic.
+**INPUT DATA:**
+-Brand: ${row.brand || ""}
+-Title: ${row.title || ""}
+-Bullet 1: ${row.bullet1 || ""}
+-Bullet 2: ${row.bullet2 || ""}
+-Description: ${row.description || ""}
 
-Content:
-Brand: ${row.brand || ""}
-Title: ${row.title || ""}
-Bullet 1: ${row.bullet1 || ""}
-Bullet 2: ${row.bullet2 || ""}
-Description: ${row.description || ""}
+**STRICT COMPLIANCE RULES (Based on Amazon Policy):**
+1. **ILLEGAL OR INFRINGING (High Risk):**
+   - **Trademarks/Copyrights:** Flag any potential use of famous brands (e.g., Disney, Nike), band names, song lyrics, movie quotes, TV shows, video games, or celebrities.
+   - **Note:** You are an AI, not a trademark database (USPTO), but you must flag *likely* protected terms.
+
+2. **OFFENSIVE OR CONTROVERSIAL:**
+   - **Hate/Violence:** No promotion of hatred, violence, racial/religious intolerance, or human tragedies.
+   - **Profanity:** No F-words or attacks on groups.
+   - **Drugs:** No promotion of illegal acts or drugs.
+   - **Sexual Content:** No pornography or sexually obscene content.
+   - **Youth Policy:** If the content is sexual, profane, or promotes violence, it strictly CANNOT be on Youth products (flag this if the text implies it might be sold to kids).
+
+3. **METADATA & CUSTOMER EXPERIENCE (Strictly Enforced):**
+   - **Product Quality:** DO NOT describe the shirt itself (e.g., "high quality," "cotton," "soft," "comfortable," "premium fit"). Describe only the *design*.
+   - **Shipping/Service:** DO NOT mention "fast shipping," "delivery," "returns," "money back," or "best seller."
+   - **Charity/Donations:** DO NOT claim proceeds go to charity.
+   - **Keywords:** Avoid keyword stuffing (e.g., "gift for mom dad sister brother...").
+   - **Reviews:** DO NOT ask for reviews.
 
 Return JSON:
 {
