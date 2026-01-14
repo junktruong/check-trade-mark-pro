@@ -76,7 +76,7 @@ function extractTmhuntLiveTextMarks(tm: any): string[] {
         "";
 
       type =
-        tokens.find((t) => t === "TEXT" || t.includes("TEXT")) ||
+        tokens.find((t) => t === "Text" || t.includes("Text")) ||
         tokens.find((t) => t === "DESIGN" || t.includes("DESIGN")) ||
         tokens.find((t) => t === "FIGURE" || t.includes("FIGURE")) ||
         "";
@@ -92,7 +92,7 @@ function extractTmhuntLiveTextMarks(tm: any): string[] {
     const s = String(status || "").toUpperCase();
     const t = String(type || "").toUpperCase();
 
-    if (m && s.includes("LIVE") && (t === "TEXT" || t.includes("TEXT"))) {
+    if (m && s.includes("LIVE") && (t === "Text" || t.includes("Text"))) {
       out.push(m);
     }
   }
