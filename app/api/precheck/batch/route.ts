@@ -28,9 +28,11 @@ function norm(s: any) {
     .replace(/\s+/g, " ")
     .trim();
 }
+
 function sha256(s: string) {
   return crypto.createHash("sha256").update(s).digest("hex");
 }
+
 function uniq(arr: string[]) {
   return Array.from(new Set(arr));
 }
@@ -41,30 +43,67 @@ function buildText(r: any) {
     .join(" ");
 }
 
-/** TMHunt parse helper: accept multiple shapes */
-function extractTmhuntMarks(tm: any): string[] {
+/** TMHunt parse helper: ONLY LIVE + TEXT */
+function extractTmhuntLiveTextMarks(tm: any): string[] {
   const src = tm?.liveMarks;
   if (!Array.isArray(src)) return [];
 
-  return src
-    .map((x: any) => {
-      // case 1: string
-      if (typeof x === "string") return x;
+  const out: string[] = [];
 
-      // case 2: array row like ["76491346","LEGEND","LIVE",...]
-      if (Array.isArray(x)) return x?.[1] ?? "";
+  for (const x of src) {
+    let mark = "";
+    let status = "";
+    let type = "";
 
-      // case 3: object
-      return x?.[1] ?? x?.wordmark ?? x?.mark ?? x?.trademark ?? "";
-    })
-    .map(norm)
-    .filter(Boolean);
+    // case 1: string
+    if (typeof x === "string") {
+      mark = x;
+      // assume liveMarks list implies LIVE + TEXT if TMHunt doesn't provide metadata here
+      status = "LIVE";
+      type = "TEXT";
+    }
+    // case 2: array row like ["76491346","LEGEND","LIVE","TEXT",...]
+    else if (Array.isArray(x)) {
+      mark = x?.[1] ?? "";
+      const tokens = x
+        .filter((v) => typeof v === "string")
+        .map((v) => String(v).toUpperCase());
+
+      status =
+        tokens.find((t) => t.includes("LIVE")) ||
+        tokens.find((t) => t.includes("DEAD")) ||
+        tokens.find((t) => t.includes("PENDING")) ||
+        "";
+
+      type =
+        tokens.find((t) => t === "TEXT" || t.includes("TEXT")) ||
+        tokens.find((t) => t === "DESIGN" || t.includes("DESIGN")) ||
+        tokens.find((t) => t === "FIGURE" || t.includes("FIGURE")) ||
+        "";
+    }
+    // case 3: object
+    else if (typeof x === "object" && x) {
+      mark = x?.[1] ?? x?.wordmark ?? x?.mark ?? x?.trademark ?? "";
+      status = String(x?.status ?? x?.state ?? x?.lifecycle ?? "").toUpperCase();
+      type = String(x?.type ?? x?.markType ?? x?.kind ?? "").toUpperCase();
+    }
+
+    const m = norm(mark);
+    const s = String(status || "").toUpperCase();
+    const t = String(type || "").toUpperCase();
+
+    if (m && s.includes("LIVE") && (t === "TEXT" || t.includes("TEXT"))) {
+      out.push(m);
+    }
+  }
+
+  return uniq(out);
 }
 
 /**
  * Filter synonyms:
  * - remove allowlist (safe words)
- * - remove anything TMHunt returns LIVE
+ * - remove anything TMHunt returns LIVE + TEXT
  */
 async function filterSynonymsByAllowAndTMHunt(syns: string[], allow: string[]) {
   const allowSet = new Set(allow.map(norm).filter(Boolean));
@@ -73,7 +112,7 @@ async function filterSynonymsByAllowAndTMHunt(syns: string[], allow: string[]) {
   if (!candidates.length) return { safe: [] as string[], live: [] as string[] };
 
   const tm = await callTMHunt(candidates.join(" "));
-  const live = uniq(extractTmhuntMarks(tm));
+  const live = uniq(extractTmhuntLiveTextMarks(tm));
   const liveSet = new Set(live);
 
   const safe = candidates.filter((s) => !liveSet.has(s));
@@ -120,9 +159,23 @@ Return JSON:
 {
   "policy_ok": true|false,
   "policy_issues": [
-    {"field":"brand|title|bullet1|bullet2|description","type":"IP|MISLEADING|HATE|ADULT|DRUGS|VIOLENCE|OTHER","message":"...","fix_suggestion":"..."}
+    {
+      "field":"brand|title|bullet1|bullet2|description",
+      "type":"IP|MISLEADING|HATE|ADULT|DRUGS|VIOLENCE|OTHER",
+      "message":"...",
+      "fix_suggestion":"...",
+      "evidence":[
+        "EXACT offending substring from that field",
+        "another exact substring (optional)"
+      ]
+    }
   ]
-}`;
+}
+
+Rules for evidence:
+- evidence items MUST be exact text copied from the input field (verbatim).
+- Keep each evidence short (<= 120 chars) and max 3 per issue.
+- If multiple problems exist in one field, include multiple evidence snippets.`;
 
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -141,6 +194,10 @@ Return JSON:
                 type: { type: "STRING" },
                 message: { type: "STRING" },
                 fix_suggestion: { type: "STRING" },
+                evidence: {
+                  type: "ARRAY",
+                  items: { type: "STRING" },
+                },
               },
             },
           },
@@ -156,7 +213,9 @@ Return JSON:
   });
 
   const data = await res.json();
-  if (!res.ok || data?.error) throw new Error(data?.error?.message || `Gemini HTTP ${res.status}`);
+  if (!res.ok || data?.error) {
+    throw new Error(data?.error?.message || `Gemini HTTP ${res.status}`);
+  }
 
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error("Gemini returned empty response");
@@ -233,11 +292,9 @@ export async function POST(req: Request) {
             { $set: { lastSeenAt: now }, $inc: { hitCount: 1 } }
           );
 
-          // ✅ build suggestionsByWord from stored synonyms, then filter by allow + TMHunt
+          // ✅ build suggestionsByWord from stored synonyms, then filter by allow + TMHunt (LIVE+TEXT)
           const suggestionsByWord: Record<string, string[]> = {};
-          const allSyns = uniq(
-            hits.flatMap((w) => (denyMap.get(w) || []).map(norm)).filter(Boolean)
-          );
+          const allSyns = uniq(hits.flatMap((w) => (denyMap.get(w) || []).map(norm)).filter(Boolean));
 
           if (allSyns.length) {
             const { safe } = await filterSynonymsByAllowAndTMHunt(allSyns, allow);
@@ -273,17 +330,31 @@ export async function POST(req: Request) {
         }
       }
 
-      // ===== Step 2: Gemini policy =====
+      // ===== Step 2: Gemini policy (with evidence + highlightsByField) =====
       if (enablePolicy) {
         const pr = await geminiPolicyCheck(r);
         const ok = !!pr?.policy_ok;
 
         if (!ok) {
+          const issues = Array.isArray(pr?.policy_issues) ? pr.policy_issues : [];
+
+          // Build highlightsByField for easy UI highlight
+          const highlightsByField: Record<string, string[]> = {};
+          for (const it of issues) {
+            const field = String(it?.field || "other");
+            const evs = Array.isArray(it?.evidence) ? it.evidence : [];
+            if (!highlightsByField[field]) highlightsByField[field] = [];
+            for (const e of evs) if (e) highlightsByField[field].push(String(e));
+          }
+          for (const k of Object.keys(highlightsByField)) {
+            highlightsByField[k] = Array.from(new Set(highlightsByField[k]));
+          }
+
           const fail = {
             ok: false,
             step: "GEMINI_POLICY",
             row: { index: i, name },
-            details: { issues: pr?.policy_issues || [] },
+            details: { issues, highlightsByField }, // ✅ NEW
             cache: "MISS",
           };
 
@@ -297,11 +368,11 @@ export async function POST(req: Request) {
         }
       }
 
-      // ===== Step 3: TMHunt + allow filter + save blocked =====
+      // ===== Step 3: TMHunt (ONLY LIVE + TEXT) + allow filter + save blocked =====
       if (enableTm) {
         const tm = await callTMHunt(normalizedText);
 
-        const liveMarks = uniq(extractTmhuntMarks(tm));
+        const liveMarks = uniq(extractTmhuntLiveTextMarks(tm)); // ✅ LIVE+TEXT only
         const allowSet = new Set(allow);
         const filtered = liveMarks.filter((m) => !allowSet.has(m));
 
@@ -329,7 +400,7 @@ export async function POST(req: Request) {
             row: { index: i, name },
             details: {
               liveMarks: filtered,
-              message: "These terms appear LIVE. Replace/remove, or add to allowlist if intended.",
+              message: "These terms appear LIVE (TEXT). Replace/remove, or add to allowlist if intended.",
             },
             cache: "MISS",
           };
