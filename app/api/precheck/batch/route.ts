@@ -60,7 +60,7 @@ function extractTmhuntLiveTextMarks(tm: any): string[] {
       mark = x;
       // assume liveMarks list implies LIVE + TEXT if TMHunt doesn't provide metadata here
       status = "LIVE";
-      type = "TEXT";
+      type = "Text";
     }
     // case 2: array row like ["76491346","LEGEND","LIVE","TEXT",...]
     else if (Array.isArray(x)) {
