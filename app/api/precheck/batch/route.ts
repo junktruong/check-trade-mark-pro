@@ -14,7 +14,7 @@ function cors(req: Request) {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400",
-    "Vary": "Origin",
+    Vary: "Origin",
   };
 }
 
@@ -23,7 +23,10 @@ export async function OPTIONS(req: Request) {
 }
 
 function norm(s: any) {
-  return String(s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  return String(s ?? "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
 }
 function sha256(s: string) {
   return crypto.createHash("sha256").update(s).digest("hex");
@@ -38,6 +41,45 @@ function buildText(r: any) {
     .join(" ");
 }
 
+/** TMHunt parse helper: accept multiple shapes */
+function extractTmhuntMarks(tm: any): string[] {
+  const src = tm?.liveMarks;
+  if (!Array.isArray(src)) return [];
+
+  return src
+    .map((x: any) => {
+      // case 1: string
+      if (typeof x === "string") return x;
+
+      // case 2: array row like ["76491346","LEGEND","LIVE",...]
+      if (Array.isArray(x)) return x?.[1] ?? "";
+
+      // case 3: object
+      return x?.[1] ?? x?.wordmark ?? x?.mark ?? x?.trademark ?? "";
+    })
+    .map(norm)
+    .filter(Boolean);
+}
+
+/**
+ * Filter synonyms:
+ * - remove allowlist (safe words)
+ * - remove anything TMHunt returns LIVE
+ */
+async function filterSynonymsByAllowAndTMHunt(syns: string[], allow: string[]) {
+  const allowSet = new Set(allow.map(norm).filter(Boolean));
+  const candidates = uniq(syns.map(norm).filter(Boolean)).filter((s) => !allowSet.has(s));
+
+  if (!candidates.length) return { safe: [] as string[], live: [] as string[] };
+
+  const tm = await callTMHunt(candidates.join(" "));
+  const live = uniq(extractTmhuntMarks(tm));
+  const liveSet = new Set(live);
+
+  const safe = candidates.filter((s) => !liveSet.has(s));
+  return { safe, live };
+}
+
 async function geminiPolicyCheck(row: any) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("Server missing GEMINI_API_KEY");
@@ -47,7 +89,6 @@ async function geminiPolicyCheck(row: any) {
 
   const prompt = `You are a strict **Amazon Merch on Demand Compliance Reviewer**.
 Your task is to review the following listing text (Title, Bullets, Description) and flag ANY potential violations of Amazon's Content Policies.
-
 
 **INPUT DATA:**
 -Brand: ${row.brand || ""}
@@ -113,6 +154,7 @@ Return JSON:
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+
   const data = await res.json();
   if (!res.ok || data?.error) throw new Error(data?.error?.message || `Gemini HTTP ${res.status}`);
 
@@ -141,8 +183,21 @@ export async function POST(req: Request) {
     await connectMongo();
 
     // load allow/block once for whole batch
-    const allow = (await AllowWord.find({}).lean()).map((x: any) => norm(x.value)).filter(Boolean);
-    const deny = (await BlockWord.find({}).lean()).map((x: any) => norm(x.value)).filter(Boolean);
+    const allow = (await AllowWord.find({}).lean())
+      .map((x: any) => norm(x.value))
+      .filter(Boolean);
+
+    const denyDocs = await BlockWord.find({}).lean();
+    const deny = denyDocs.map((x: any) => norm(x.value)).filter(Boolean);
+
+    // map value -> synonyms
+    const denyMap = new Map<string, string[]>();
+    for (const d of denyDocs) {
+      const key = norm(d?.value);
+      if (!key) continue;
+      const syns = Array.isArray(d?.synonyms) ? d.synonyms.map(norm).filter(Boolean) : [];
+      denyMap.set(key, syns);
+    }
 
     const flagsKey = `${enableText ? 1 : 0}${enablePolicy ? 1 : 0}${enableTm ? 1 : 0}`;
 
@@ -168,19 +223,52 @@ export async function POST(req: Request) {
       // ===== Step 1: blocklist =====
       if (enableText) {
         const hits = uniq(deny.filter((w) => w && normalizedText.includes(w)));
+
         if (hits.length) {
+          const now = new Date();
+
+          // optional: track stats for admin
+          await BlockWord.updateMany(
+            { value: { $in: hits } },
+            { $set: { lastSeenAt: now }, $inc: { hitCount: 1 } }
+          );
+
+          // ✅ build suggestionsByWord from stored synonyms, then filter by allow + TMHunt
+          const suggestionsByWord: Record<string, string[]> = {};
+          const allSyns = uniq(
+            hits.flatMap((w) => (denyMap.get(w) || []).map(norm)).filter(Boolean)
+          );
+
+          if (allSyns.length) {
+            const { safe } = await filterSynonymsByAllowAndTMHunt(allSyns, allow);
+            const safeSet = new Set(safe);
+
+            for (const w of hits) {
+              const syns = uniq((denyMap.get(w) || []).map(norm).filter(Boolean));
+              suggestionsByWord[w] = syns.filter((s) => safeSet.has(s)).slice(0, 12);
+            }
+          } else {
+            for (const w of hits) suggestionsByWord[w] = [];
+          }
+
           const fail = {
             ok: false,
             step: "BLOCKLIST",
             row: { index: i, name },
-            details: { blockedWords: hits, message: "Remove/replace blocked words." },
+            details: {
+              blockedWords: hits,
+              suggestionsByWord, // ✅ NEW
+              message: "Replace blocked words using suggested safe alternatives.",
+            },
             cache: "MISS",
           };
+
           await PrecheckCache.updateOne(
             { hash },
-            { $set: { ok: false, step: "BLOCKLIST", details: fail.details, ts: new Date() } },
+            { $set: { ok: false, step: "BLOCKLIST", details: fail.details, ts: now } },
             { upsert: true }
           );
+
           return NextResponse.json(fail, { headers: cors(req) });
         }
       }
@@ -189,6 +277,7 @@ export async function POST(req: Request) {
       if (enablePolicy) {
         const pr = await geminiPolicyCheck(r);
         const ok = !!pr?.policy_ok;
+
         if (!ok) {
           const fail = {
             ok: false,
@@ -197,11 +286,13 @@ export async function POST(req: Request) {
             details: { issues: pr?.policy_issues || [] },
             cache: "MISS",
           };
+
           await PrecheckCache.updateOne(
             { hash },
             { $set: { ok: false, step: "GEMINI_POLICY", details: fail.details, ts: new Date() } },
             { upsert: true }
           );
+
           return NextResponse.json(fail, { headers: cors(req) });
         }
       }
@@ -210,12 +301,9 @@ export async function POST(req: Request) {
       if (enableTm) {
         const tm = await callTMHunt(normalizedText);
 
-        const liveMarksRaw: string[] = Array.isArray(tm?.liveMarks)
-          ? tm.liveMarks.map((x: any) => (typeof x === "string" ? x : x?.[1] ?? x?.wordmark ?? x?.mark ?? ""))
-          : [];
-
-        const liveMarks = uniq(liveMarksRaw.map(norm).filter(Boolean));
-        const filtered = liveMarks.filter((m) => !allow.includes(m));
+        const liveMarks = uniq(extractTmhuntMarks(tm));
+        const allowSet = new Set(allow);
+        const filtered = liveMarks.filter((m) => !allowSet.has(m));
 
         if (filtered.length) {
           // ✅ lưu vào DB (source tmhunt)
@@ -225,7 +313,7 @@ export async function POST(req: Request) {
               updateOne: {
                 filter: { value: w },
                 update: {
-                  $setOnInsert: { value: w, source: "tmhunt", createdAt: now },
+                  $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [] },
                   $set: { lastSeenAt: now },
                   $inc: { hitCount: 1 },
                 },
@@ -239,14 +327,19 @@ export async function POST(req: Request) {
             ok: false,
             step: "TMHUNT",
             row: { index: i, name },
-            details: { liveMarks: filtered, message: "Remove/replace these terms, or add to allowlist if intended." },
+            details: {
+              liveMarks: filtered,
+              message: "These terms appear LIVE. Replace/remove, or add to allowlist if intended.",
+            },
             cache: "MISS",
           };
+
           await PrecheckCache.updateOne(
             { hash },
-            { $set: { ok: false, step: "TMHUNT", details: fail.details, ts: new Date() } },
+            { $set: { ok: false, step: "TMHUNT", details: fail.details, ts: now } },
             { upsert: true }
           );
+
           return NextResponse.json(fail, { headers: cors(req) });
         }
       }
