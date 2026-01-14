@@ -55,7 +55,9 @@ export async function filterSynonymsByTMHuntAndAllowlist(
 
   // Call TMHunt once with combined text (cheaper)
   const tm = await callTMHunt(candidates.join(" "));
-  const liveMarks = new Set((tm?.liveMarks || []).map(normToken));
+  const liveMarks = new Set(
+    (tm?.liveMarks ?? []).map((mark) => normToken(String(mark)))
+  );
 
   candidates = candidates.filter((w) => !liveMarks.has(normToken(w)));
   return candidates.slice(0, 20);

@@ -5,13 +5,14 @@ import { normToken, uniq } from "@/lib/synonyms";
 
 export async function POST(
   req: Request,
-  { params }: { params: { id: string } }
+   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+     const { id } = await params;
     const { add = [], remove = [], set = null } = await req.json();
 
     await connectMongo();
-    const doc = await BlockWord.findById(params.id);
+    const doc = await BlockWord.findById(id);
     if (!doc) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
 
     const current = (doc.synonyms || []).map(normToken);

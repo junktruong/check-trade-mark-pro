@@ -10,13 +10,14 @@ import {
 
 export async function POST(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string } >}
 ) {
   try {
     const { q } = await req.json(); // optional override term
+     const { id } = await params;
     await connectMongo();
 
-    const doc = await BlockWord.findById(params.id);
+    const doc = await BlockWord.findById(id);
     if (!doc) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
 
     const term = normToken(q || doc.value);
