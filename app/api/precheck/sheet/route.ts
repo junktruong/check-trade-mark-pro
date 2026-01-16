@@ -248,8 +248,8 @@ function extractLiveTextMarks(tm: any): string[] {
       const type = norm(x?.[3] ?? "");
 
       if (!word) continue;
-      if (status && status !== "live") continue;
-      if (type && type !== "text") continue;
+      if (status && status !== "LIVE") continue;
+      if (type && type !== "Text") continue;
 
       out.push(word);
       continue;
@@ -261,8 +261,8 @@ function extractLiveTextMarks(tm: any): string[] {
     const type = norm(x?.type ?? x?.markType ?? x?.kind ?? "");
 
     if (!word) continue;
-    if (status && status !== "live") continue;
-    if (type && type !== "text") continue;
+    if (status && status !== "LIVE") continue;
+    if (type && type !== "Text") continue;
 
     out.push(word);
   }
