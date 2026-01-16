@@ -1,9 +1,23 @@
 import { NextResponse } from "next/server";
-import crypto from "crypto";
-import { connectMongo } from "@/lib/mongo";
-import { AllowWord, WarningWord, BlockWord } from "@/models/Words";
+import { WarningWord, BlockWord } from "@/models/Words";
 import { PrecheckRow } from "@/models/PrecheckRow";
 import { callTMHunt } from "@/lib/tmhunt";
+import { fetchCsvFromSheet, getRowsFromCsv } from "./csv";
+import { geminiPolicyCheck, geminiYouthImageCheck, buildHighlightsByField } from "./gemini";
+import { parsePrecheckRequest } from "./request";
+import {
+  buildRowHash,
+  buildRowsByName,
+  buildText,
+  cleanRowObject,
+  isTrulyEmptyRow,
+  isUsableRow,
+  looksLikeHeaderRow,
+  norm,
+  normalizeRows,
+  uniq,
+} from "./rows";
+import { buildSuggestionsByWord, extractLiveTextMarks, loadWordData } from "./words";
 
 export const runtime = "nodejs";
 
@@ -22,394 +36,11 @@ export async function OPTIONS(req: Request) {
   return new NextResponse(null, { status: 204, headers: cors(req) });
 }
 
-// -------------------- utils --------------------
-function norm(s: any) {
-  return String(s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
-}
-function uniq(arr: string[]) {
-  return Array.from(new Set(arr));
-}
-function buildText(r: any) {
-  return [r.brand, r.title, r.bullet1, r.bullet2, r.description].filter(Boolean).join(" ");
-}
-function sha256(s: string) {
-  return crypto.createHash("sha256").update(s).digest("hex");
-}
-function buildRowHash(params: {
-  row: any;
-  fitType: string;
-  enableText: boolean;
-  enablePolicy: boolean;
-  enableTm: boolean;
-}) {
-  const payload = {
-    name: String(params.row?.name || ""),
-    brand: String(params.row?.brand || ""),
-    title: String(params.row?.title || ""),
-    bullet1: String(params.row?.bullet1 || ""),
-    bullet2: String(params.row?.bullet2 || ""),
-    description: String(params.row?.description || ""),
-    price: String(params.row?.price || ""),
-    image_url: String(params.row?.image_url || ""),
-    thumbnail_url: String(params.row?.thumbnail_url || ""),
-    fitType: String(params.fitType || "none"),
-    flags: {
-      enableText: !!params.enableText,
-      enablePolicy: !!params.enablePolicy,
-      enableTm: !!params.enableTm,
-    },
-  };
-  return sha256(JSON.stringify(payload));
-}
-
-// -------------------- Google Sheet -> CSV URL --------------------
-function parseGidFromUrl(u: string) {
-  try {
-    const url = new URL(String(u || "").trim());
-    const gidFromQuery = url.searchParams.get("gid");
-    if (gidFromQuery) return gidFromQuery;
-
-    const hash = (url.hash || "").replace(/^#/, "");
-    const m = hash.match(/(^|&)gid=(\d+)/);
-    if (m) return m[2];
-  } catch {}
-  return "";
-}
-function buildGoogleSheetCsvUrl(sheetLink: string) {
-  const s = String(sheetLink || "").trim();
-  if (!s) return "";
-
-  if (/\/export\?/i.test(s) && /format=csv/i.test(s)) return s;
-
-  const m = s.match(/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-  if (!m) return "";
-
-  const id = m[1];
-  const gid = parseGidFromUrl(s) || "0";
-  return `https://docs.google.com/spreadsheets/d/${id}/export?format=csv&gid=${encodeURIComponent(gid)}`;
-}
-
-// -------------------- CSV parser --------------------
-function parseCsv(text: string): string[][] {
-  const out: string[][] = [];
-  const s = String(text ?? "");
-
-  let row: string[] = [];
-  let cur = "";
-  let i = 0;
-  let inQ = false;
-
-  const pushCell = () => {
-    row.push(cur);
-    cur = "";
-  };
-  const pushRow = () => {
-    row = row.map((x) => (x.endsWith("\r") ? x.slice(0, -1) : x));
-    if (row.some((x) => String(x).trim() !== "")) out.push(row);
-    row = [];
-  };
-
-  while (i < s.length) {
-    const ch = s[i];
-
-    if (inQ) {
-      if (ch === '"') {
-        const next = s[i + 1];
-        if (next === '"') {
-          cur += '"';
-          i += 2;
-          continue;
-        }
-        inQ = false;
-        i++;
-        continue;
-      }
-      cur += ch;
-      i++;
-      continue;
-    }
-
-    if (ch === '"') {
-      inQ = true;
-      i++;
-      continue;
-    }
-
-    if (ch === ",") {
-      pushCell();
-      i++;
-      continue;
-    }
-
-    if (ch === "\n") {
-      pushCell();
-      pushRow();
-      i++;
-      continue;
-    }
-
-    cur += ch;
-    i++;
-  }
-
-  pushCell();
-  pushRow();
-  return out;
-}
-
-function toObjectsFromCsv(csvText: string): any[] {
-  const rows2d = parseCsv(csvText);
-  if (!rows2d.length) return [];
-
-  const headers = rows2d[0].map((h) => String(h || "").replace(/^\uFEFF/, "").trim());
-  const body = rows2d.slice(1);
-
-  return body.map((r) => {
-    const obj: any = {};
-    for (let i = 0; i < headers.length; i++) {
-      const k = headers[i];
-      if (!k) continue;
-      obj[k] = (r[i] ?? "").toString();
-    }
-    return obj;
-  });
-}
-
-function extractImgSrc(value: any): string {
-  const s = String(value || "").trim();
-  if (!s) return "";
-  if (/^https?:\/\/\S+$/i.test(s)) return s;
-
-  const m = s.match(/<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/i);
-  if (m && m[1]) return String(m[1]).trim();
-
-  const m2 = s.match(/https?:\/\/[^\s"'<>]+/i);
-  return m2 ? m2[0] : "";
-}
-
-function pickRowImageUrls(row: any) {
-  const fullRaw = row?.image_url ?? row?.image ?? row?.artwork_url ?? row?.artwork ?? "";
-  const thumbRaw = row?.thumbnail_url ?? row?.thumb_url ?? row?.image_thumb ?? row?.thumb ?? row?.thumbnail ?? "";
-  return { fullUrl: extractImgSrc(fullRaw), thumbUrl: extractImgSrc(thumbRaw) };
-}
-
-function cleanRowObject(obj: any) {
-  const out: any = {};
-  for (const [k, v] of Object.entries(obj || {})) out[k] = typeof v === "string" ? v.trim() : v;
-  return out;
-}
-function isTrulyEmptyRow(obj: any) {
-  return !Object.values(obj || {}).some((v) => String(v ?? "").trim() !== "");
-}
-function looksLikeHeaderRow(obj: any) {
-  const n = String(obj?.name ?? "").trim().toLowerCase();
-  const t = String(obj?.title ?? "").trim().toLowerCase();
-  const b = String(obj?.brand ?? "").trim().toLowerCase();
-  return (n === "name" && t === "title") || (n === "name" && b === "brand");
-}
-function isUsableRow(obj: any) {
-  const name = String(obj?.name ?? "").trim();
-  const title = String(obj?.title ?? "").trim();
-  const img = extractImgSrc(obj?.image_url ?? obj?.image ?? "");
-  return !!(name || title || img);
-}
-
-// -------------------- TMHunt parsing (LIVE + TEXT strict) --------------------
-function extractLiveTextMarks(tm: any): string[] {
-  const src = tm?.liveMarks;
-  if (!Array.isArray(src)) return [];
-
-  const out: string[] = [];
-  for (const x of src) {
-    if (!x) continue;
-
-    // ❌ bỏ string (không có status/type)
-    if (typeof x === "string") continue;
-
-    if (Array.isArray(x)) {
-      const word = norm(x?.[1] ?? "");
-      const status = norm(x?.[2] ?? "");
-      const type = norm(x?.[3] ?? x?.[4] ?? "");
-      if (word && status === "live" && type === "text") out.push(word);
-      continue;
-    }
-
-    if (typeof x === "object") {
-      const word = norm(x?.[1] ?? x?.wordmark ?? x?.mark ?? x?.trademark ?? x?.text ?? "");
-      const status = norm(x?.status ?? x?.liveStatus ?? x?.state ?? x?.[2] ?? "");
-      const type = norm(x?.type ?? x?.markType ?? x?.kind ?? x?.[3] ?? x?.[4] ?? "");
-      if (word && status === "live" && type === "text") out.push(word);
-    }
-  }
-
-  return uniq(out).filter(Boolean);
-}
-
-// -------------------- Gemini Policy Check (WARNING) --------------------
-async function geminiPolicyCheck(row: any) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("Server missing GEMINI_API_KEY");
-
-  const model = process.env.GEMINI_TEXT_MODEL || "gemini-2.5-flash-preview-09-2025";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-
-  const prompt = `You are a strict **Amazon Merch on Demand Compliance Reviewer**.
-Review listing text and flag ANY potential Amazon policy violations.
-
-**INPUT DATA:**
--Brand: ${row.brand || ""}
--Title: ${row.title || ""}
--Bullet 1: ${row.bullet1 || ""}
--Bullet 2: ${row.bullet2 || ""}
--Description: ${row.description || ""}
-
-Return JSON ONLY:
-{
-  "policy_ok": true|false,
-  "policy_issues": [
-    {
-      "field":"brand|title|bullet1|bullet2|description",
-      "type":"IP|MISLEADING|HATE|ADULT|DRUGS|VIOLENCE|OTHER",
-      "message":"...",
-      "fix_suggestion":"...",
-      "evidence":["exact short snippets"],
-      "terms":["key risky terms/phrases (normalized)"]
-    }
-  ]
-}`;
-
-  const payload = {
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "OBJECT",
-        properties: {
-          policy_ok: { type: "BOOLEAN" },
-          policy_issues: {
-            type: "ARRAY",
-            items: {
-              type: "OBJECT",
-              properties: {
-                field: { type: "STRING" },
-                type: { type: "STRING" },
-                message: { type: "STRING" },
-                fix_suggestion: { type: "STRING" },
-                evidence: { type: "ARRAY", items: { type: "STRING" } },
-                terms: { type: "ARRAY", items: { type: "STRING" } },
-              },
-            },
-          },
-        },
-      },
-    },
-  };
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  const data = await res.json();
-  if (!res.ok || data?.error) throw new Error(data?.error?.message || `Gemini HTTP ${res.status}`);
-
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("Gemini returned empty response");
-
-  return JSON.parse(text);
-}
-
-// -------------------- Gemini Youth Image Check (WARNING) --------------------
-async function geminiYouthImageCheck(imageUrl: string, fitType: string) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("Server missing GEMINI_API_KEY");
-
-  const model = process.env.GEMINI_VISION_MODEL || "gemini-2.0-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-
-  const imgRes = await fetch(imageUrl, { cache: "no-store", redirect: "follow" });
-  if (!imgRes.ok) throw new Error(`Fetch image failed: HTTP ${imgRes.status}`);
-
-  const contentType = imgRes.headers.get("content-type") || "image/jpeg";
-  const buf = Buffer.from(await imgRes.arrayBuffer());
-  const base64 = buf.toString("base64");
-
-  const prompt = `You are a strict Amazon Merch on Demand reviewer.
-Check if this design is appropriate for minors (${fitType}). If it contains adult, sexual, violent, drug-related, hate, or mature themes, flag it.
-
-Return JSON ONLY:
-{
-  "youth_ok": true|false,
-  "issues": [
-    {
-      "type":"ADULT|SEXUAL|VIOLENCE|DRUGS|HATE|OTHER",
-      "message":"short reason"
-    }
-  ]
-}`;
-
-  const payload = {
-    contents: [
-      {
-        parts: [
-          { text: prompt },
-          {
-            inline_data: {
-              mime_type: contentType,
-              data: base64,
-            },
-          },
-        ],
-      },
-    ],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "OBJECT",
-        properties: {
-          youth_ok: { type: "BOOLEAN" },
-          issues: {
-            type: "ARRAY",
-            items: {
-              type: "OBJECT",
-              properties: {
-                type: { type: "STRING" },
-                message: { type: "STRING" },
-              },
-            },
-          },
-        },
-      },
-    },
-  };
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  const data = await res.json();
-  if (!res.ok || data?.error) throw new Error(data?.error?.message || `Gemini HTTP ${res.status}`);
-
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("Gemini returned empty response");
-
-  return JSON.parse(text);
-}
-
-function buildHighlightsByField(issues: any[]) {
-  const out: Record<string, string[]> = {};
-  for (const it of issues || []) {
-    const f = String(it?.field || "").toLowerCase();
-    const ev = Array.isArray(it?.evidence) ? it.evidence.map((x: any) => String(x)).filter(Boolean) : [];
-    if (!f || !ev.length) continue;
-    if (!out[f]) out[f] = [];
-    out[f].push(...ev);
-  }
-  for (const k of Object.keys(out)) out[k] = uniq(out[k]).slice(0, 20);
-  return out;
+async function loadCachedRows(rowsByName: Map<string, any>) {
+  const cachedRows = rowsByName.size
+    ? await PrecheckRow.find({ name: { $in: [...rowsByName.keys()] } }).lean()
+    : [];
+  return new Map<string, any>(cachedRows.map((doc: any) => [String(doc?.name || "").trim(), doc]));
 }
 
 // -------------------- Image -> rankedColors (server) --------------------
@@ -517,32 +148,23 @@ async function computeRankedColorsFromImageUrl(imageUrl: string) {
 // -------------------- Main handler --------------------
 export async function POST(req: Request) {
   try {
-    const body = await req.json().catch(() => ({}));
-    const sheetUrl = String(body?.sheetUrl || "").trim();
-    const options = body?.options || {};
-    const enableText = !!options.enableTextCheck;
-    const enablePolicy = !!options.enablePolicyCheck;
-    const enableTm = !!options.enableTmCheck;
-    const fitType = String(body?.fitType || "none").trim().toLowerCase();
-    const requiresYouthCheck = fitType === "youth" || fitType === "girl" || fitType === "girls";
+    const { sheetUrl, enableText, enablePolicy, enableTm, fitType, requiresYouthCheck } = await parsePrecheckRequest(req);
 
     if (!sheetUrl) {
       return NextResponse.json({ ok: false, error: "sheetUrl is empty" }, { status: 400, headers: cors(req) });
     }
 
-    const csvUrl = buildGoogleSheetCsvUrl(sheetUrl);
-    if (!csvUrl) {
-      return NextResponse.json({ ok: false, error: "Invalid Google Sheet link" }, { status: 400, headers: cors(req) });
+    let csvText = "";
+    try {
+      csvText = await fetchCsvFromSheet(sheetUrl);
+    } catch (e: any) {
+      return NextResponse.json(
+        { ok: false, error: e?.message || String(e) },
+        { status: e?.message?.startsWith("Fetch CSV failed") ? 502 : 400, headers: cors(req) }
+      );
     }
 
-    const csvRes = await fetch(csvUrl, { method: "GET", cache: "no-store", redirect: "follow" });
-    if (!csvRes.ok) {
-      return NextResponse.json({ ok: false, error: `Fetch CSV failed: HTTP ${csvRes.status}` }, { status: 502, headers: cors(req) });
-    }
-
-    const csvText = await csvRes.text();
-
-    const rawRows = toObjectsFromCsv(csvText)
+    const rawRows = getRowsFromCsv(csvText)
       .map(cleanRowObject)
       .filter((r) => !isTrulyEmptyRow(r))
       .filter((r) => !looksLikeHeaderRow(r))
@@ -553,69 +175,8 @@ export async function POST(req: Request) {
     }
 
     // normalize
-    const rows = rawRows.map((r, i) => {
-      const name = String(r?.name || `Row ${i + 1}`);
-      const { fullUrl, thumbUrl } = pickRowImageUrls(r);
-      return {
-        name,
-        brand: String(r?.brand || ""),
-        title: String(r?.title || ""),
-        bullet1: String(r?.bullet1 || r?.bullet_1 || ""),
-        bullet2: String(r?.bullet2 || r?.bullet_2 || ""),
-        description: String(r?.description || ""),
-        price: String(r?.price || ""),
-        image_url: String(fullUrl || ""),
-        thumbnail_url: String(thumbUrl || ""),
-      };
-    });
-
-    await connectMongo();
-
-    const allowDocs = await AllowWord.find({}).lean();
-    const warnDocs = await WarningWord.find({}).lean();
-    const blockDocs = await BlockWord.find({}).lean();
-
-    const allow = allowDocs.map((x: any) => norm(x.value)).filter(Boolean);
-    const allowSet = new Set(allow);
-
-    const warn = warnDocs.map((x: any) => norm(x.value)).filter(Boolean);
-    const block = blockDocs.map((x: any) => norm(x.value)).filter(Boolean);
-
-    const warnMap = new Map<string, string[]>();
-    for (const d of warnDocs as any[]) warnMap.set(norm(d.value), (d.synonyms || []).map(norm).filter(Boolean));
-
-    const blockMap = new Map<string, string[]>();
-    for (const d of blockDocs as any[]) blockMap.set(norm(d.value), (d.synonyms || []).map(norm).filter(Boolean));
-
-    async function filterSynonymsByAllowAndTMHunt(syns: string[]) {
-      const candidates = uniq(syns.map(norm).filter(Boolean)).filter((s) => !allowSet.has(s));
-      if (!candidates.length) return { safe: [] as string[], live: [] as string[] };
-
-      const tm = await callTMHunt(candidates.join(" "));
-      const live = uniq(extractLiveTextMarks(tm));
-      const liveSet = new Set(live);
-
-      return { safe: candidates.filter((s) => !liveSet.has(s)), live };
-    }
-
-    async function buildSuggestionsByWord(hits: string[], synMap: Map<string, string[]>) {
-      const suggestionsByWord: Record<string, string[]> = {};
-      const allSyns = uniq(hits.flatMap((w) => synMap.get(w) || []).map(norm).filter(Boolean));
-
-      if (!allSyns.length) {
-        for (const w of hits) suggestionsByWord[w] = [];
-        return suggestionsByWord;
-      }
-
-      const { safe } = await filterSynonymsByAllowAndTMHunt(allSyns);
-      const safeSet = new Set(safe);
-
-      for (const w of hits) {
-        const syns = uniq((synMap.get(w) || []).map(norm).filter(Boolean));
-        suggestionsByWord[w] = syns.filter((s) => safeSet.has(s)).slice(0, 12);
-      }
-      return suggestionsByWord;
-    }
+    const rows = normalizeRows(rawRows);
+    const { allowSet, warn, block, warnMap, blockMap } = await loadWordData();
 
     const now = new Date();
 
@@ -624,19 +185,8 @@ export async function POST(req: Request) {
 
     const tmhuntToBlock = new Set<string>();
     const geminiToWarn = new Set<string>();
-    const rowsByName = new Map<string, any>();
-
-    for (const r of rows) {
-      const n = String(r?.name || "").trim();
-      if (n) rowsByName.set(n, r);
-    }
-
-    const cachedRows = rowsByName.size
-      ? await PrecheckRow.find({ name: { $in: [...rowsByName.keys()] } }).lean()
-      : [];
-    const cachedByName = new Map<string, any>(
-      cachedRows.map((doc: any) => [String(doc?.name || "").trim(), doc])
-    );
+    const rowsByName = buildRowsByName(rows);
+    const cachedByName = await loadCachedRows(rowsByName);
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
@@ -696,7 +246,7 @@ export async function POST(req: Request) {
           status = "BLOCK";
           issues.block = {
             words: blockHits,
-            suggestionsByWord: await buildSuggestionsByWord(blockHits, blockMap),
+            suggestionsByWord: await buildSuggestionsByWord(blockHits, blockMap, allowSet),
             message: "Replace blocked words using suggested safe alternatives.",
           };
 
@@ -712,7 +262,7 @@ export async function POST(req: Request) {
           if (status !== "BLOCK") status = "WARN";
           issues.warningWords = {
             words: warnHits,
-            suggestionsByWord: await buildSuggestionsByWord(warnHits, warnMap),
+            suggestionsByWord: await buildSuggestionsByWord(warnHits, warnMap, allowSet),
             message: "Warning words found. Review and Continue if acceptable.",
           };
 
