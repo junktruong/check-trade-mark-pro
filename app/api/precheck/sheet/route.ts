@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { WarningWord, BlockWord } from "@/models/Words";
+import { WarningWord, BlockWord, Word } from "@/models/Words";
 import { PrecheckRow } from "@/models/PrecheckRow";
 import { callTMHunt } from "@/lib/tmhunt";
 import { fetchCsvFromSheet, getRowsFromCsv } from "./csv";
@@ -363,13 +363,13 @@ export async function POST(req: Request) {
     // ✅ bulk save TMHunt -> BlockWord
     if (tmhuntToBlock.size) {
       const arr = [...tmhuntToBlock];
-      await BlockWord.bulkWrite(
+      await Word.bulkWrite(
         arr.map((w) => ({
           updateOne: {
             filter: { value: w },
             update: {
-              $setOnInsert: { value: w, source: "tmhunt", synonyms: [] },
-              $set: { lastSeenAt: now },
+              $set: { kind: "BlockWord", lastSeenAt: now },
+              $setOnInsert: { value: w, source: "tmhunt", synonyms: [], hitCount: 0 },
               $inc: { hitCount: 1 },
             },
             upsert: true,
@@ -382,13 +382,13 @@ export async function POST(req: Request) {
     // ✅ bulk save Gemini -> WarningWord
     if (geminiToWarn.size) {
       const arr = [...geminiToWarn];
-      await WarningWord.bulkWrite(
+      await Word.bulkWrite(
         arr.map((w) => ({
           updateOne: {
             filter: { value: w },
             update: {
-              $setOnInsert: { value: w, source: "gemini_policy", synonyms: [] },
-              $set: { lastSeenAt: now },
+              $set: { kind: "WarningWord", lastSeenAt: now },
+              $setOnInsert: { value: w, source: "gemini_policy", synonyms: [], hitCount: 0 },
               $inc: { hitCount: 1 },
             },
             upsert: true,
