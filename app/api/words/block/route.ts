@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectMongo } from "@/lib/mongo";
-import { BlockWord } from "@/models/Words";
+import { BlockWord, Word } from "@/models/Words";
 import { callTMHunt } from "@/lib/tmhunt";
 
 function norm(s: any) {
@@ -60,6 +60,11 @@ export async function PATCH(req: Request) {
   const removeRaw = Array.isArray(body?.remove) ? body.remove : [];
 
   if (!value) return NextResponse.json({ ok: false, error: "value is empty" }, { status: 400 });
+
+  const existing = await Word.findOne({ value }).lean();
+  if (existing && existing.kind !== "BlockWord") {
+    return NextResponse.json({ ok: true, skipped: true, existingKind: existing.kind, word: null });
+  }
 
   const add = uniq(addRaw.map(norm).filter(Boolean)).filter((x) => x !== value);
   const remove = uniq(removeRaw.map(norm).filter(Boolean));

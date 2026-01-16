@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectMongo } from "@/lib/mongo";
-import { AllowWord, BlockWord } from "@/models/Words";
+import { AllowWord, BlockWord, Word } from "@/models/Words";
 import { callTMHunt } from "@/lib/tmhunt";
 
 function norm(s: any) {
@@ -8,6 +8,16 @@ function norm(s: any) {
 }
 function uniq(arr: string[]) {
   return Array.from(new Set(arr));
+}
+
+async function filterBlockCandidates(values: string[]) {
+  if (!values.length) return [];
+  const existing = await Word.find({ value: { $in: values } }, { value: 1, kind: 1 }).lean();
+  const kindByValue = new Map(existing.map((doc: any) => [String(doc.value), doc.kind]));
+  return values.filter((value) => {
+    const kind = kindByValue.get(value);
+    return !kind || kind === "BlockWord";
+  });
 }
 
 export async function POST(req: Request) {
@@ -30,20 +40,23 @@ export async function POST(req: Request) {
     if (denyHit.length > 0) {
       // optional: tăng hitCount + lastSeenAt (không bắt buộc)
       const now = new Date();
-      await BlockWord.bulkWrite(
-        denyHit.map((w) => ({
-          updateOne: {
-            filter: { value: w },
-            update: {
-              $setOnInsert: { value: w, source: "manual", createdAt: now },
-              $set: { lastSeenAt: now }, // ✅ không set source ở đây để khỏi conflict
-              $inc: { hitCount: 1 },
+      const candidates = await filterBlockCandidates(denyHit);
+      if (candidates.length) {
+        await BlockWord.bulkWrite(
+          candidates.map((w) => ({
+            updateOne: {
+              filter: { value: w },
+              update: {
+                $setOnInsert: { value: w, source: "manual", createdAt: now },
+                $set: { lastSeenAt: now }, // ✅ không set source ở đây để khỏi conflict
+                $inc: { hitCount: 1 },
+              },
+              upsert: true,
             },
-            upsert: true,
-          },
-        })),
-        { ordered: false }
-      );
+          })),
+          { ordered: false }
+        );
+      }
 
       return NextResponse.json({
         ok: false,
@@ -69,20 +82,23 @@ export async function POST(req: Request) {
       const now = new Date();
 
       // ✅ lưu từng từ vào DB, không conflict field source
-      await BlockWord.bulkWrite(
-        filtered.map((w) => ({
-          updateOne: {
-            filter: { value: w },
-            update: {
-              $setOnInsert: { value: w, source: "tmhunt", createdAt: now },
-              $set: { lastSeenAt: now }, // ✅ bỏ source ở $set
-              $inc: { hitCount: 1 },
+      const candidates = await filterBlockCandidates(filtered);
+      if (candidates.length) {
+        await BlockWord.bulkWrite(
+          candidates.map((w) => ({
+            updateOne: {
+              filter: { value: w },
+              update: {
+                $setOnInsert: { value: w, source: "tmhunt", createdAt: now },
+                $set: { lastSeenAt: now }, // ✅ bỏ source ở $set
+                $inc: { hitCount: 1 },
+              },
+              upsert: true,
             },
-            upsert: true,
-          },
-        })),
-        { ordered: false }
-      );
+          })),
+          { ordered: false }
+        );
+      }
 
       return NextResponse.json({
         ok: false,

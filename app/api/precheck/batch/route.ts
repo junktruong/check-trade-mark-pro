@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { connectMongo } from "@/lib/mongo";
-import { AllowWord, BlockWord } from "@/models/Words";
+import { AllowWord, BlockWord, Word } from "@/models/Words";
 import { PrecheckCache } from "@/models/PrecheckCache";
 import { callTMHunt } from "@/lib/tmhunt";
 
@@ -35,6 +35,16 @@ function sha256(s: string) {
 
 function uniq(arr: string[]) {
   return Array.from(new Set(arr));
+}
+
+async function filterBlockCandidates(values: string[]) {
+  if (!values.length) return [];
+  const existing = await Word.find({ value: { $in: values } }, { value: 1, kind: 1 }).lean();
+  const kindByValue = new Map(existing.map((doc: any) => [String(doc.value), doc.kind]));
+  return values.filter((value) => {
+    const kind = kindByValue.get(value);
+    return !kind || kind === "BlockWord";
+  });
 }
 
 function buildText(r: any) {
@@ -379,20 +389,23 @@ export async function POST(req: Request) {
         if (filtered.length) {
           // ✅ lưu vào DB (source tmhunt)
           const now = new Date();
-          await BlockWord.bulkWrite(
-            filtered.map((w) => ({
-              updateOne: {
-                filter: { value: w },
-                update: {
-                  $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [] },
-                  $set: { lastSeenAt: now },
-                  $inc: { hitCount: 1 },
+          const candidates = await filterBlockCandidates(filtered);
+          if (candidates.length) {
+            await BlockWord.bulkWrite(
+              candidates.map((w) => ({
+                updateOne: {
+                  filter: { value: w },
+                  update: {
+                    $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [] },
+                    $set: { lastSeenAt: now },
+                    $inc: { hitCount: 1 },
+                  },
+                  upsert: true,
                 },
-                upsert: true,
-              },
-            })),
-            { ordered: false }
-          );
+              })),
+              { ordered: false }
+            );
+          }
 
           const fail = {
             ok: false,
