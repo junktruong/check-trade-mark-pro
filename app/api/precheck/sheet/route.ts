@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
+import crypto from "crypto";
 import { connectMongo } from "@/lib/mongo";
 import { AllowWord, WarningWord, BlockWord } from "@/models/Words";
+import { PrecheckRow } from "@/models/PrecheckRow";
 import { callTMHunt } from "@/lib/tmhunt";
 
 export const runtime = "nodejs";
@@ -29,6 +31,35 @@ function uniq(arr: string[]) {
 }
 function buildText(r: any) {
   return [r.brand, r.title, r.bullet1, r.bullet2, r.description].filter(Boolean).join(" ");
+}
+function sha256(s: string) {
+  return crypto.createHash("sha256").update(s).digest("hex");
+}
+function buildRowHash(params: {
+  row: any;
+  fitType: string;
+  enableText: boolean;
+  enablePolicy: boolean;
+  enableTm: boolean;
+}) {
+  const payload = {
+    name: String(params.row?.name || ""),
+    brand: String(params.row?.brand || ""),
+    title: String(params.row?.title || ""),
+    bullet1: String(params.row?.bullet1 || ""),
+    bullet2: String(params.row?.bullet2 || ""),
+    description: String(params.row?.description || ""),
+    price: String(params.row?.price || ""),
+    image_url: String(params.row?.image_url || ""),
+    thumbnail_url: String(params.row?.thumbnail_url || ""),
+    fitType: String(params.fitType || "none"),
+    flags: {
+      enableText: !!params.enableText,
+      enablePolicy: !!params.enablePolicy,
+      enableTm: !!params.enableTm,
+    },
+  };
+  return sha256(JSON.stringify(payload));
 }
 
 // -------------------- Google Sheet -> CSV URL --------------------
@@ -289,6 +320,85 @@ Return JSON ONLY:
   return JSON.parse(text);
 }
 
+// -------------------- Gemini Youth Image Check (WARNING) --------------------
+async function geminiYouthImageCheck(imageUrl: string, fitType: string) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("Server missing GEMINI_API_KEY");
+
+  const model = process.env.GEMINI_VISION_MODEL || "gemini-2.0-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  const imgRes = await fetch(imageUrl, { cache: "no-store", redirect: "follow" });
+  if (!imgRes.ok) throw new Error(`Fetch image failed: HTTP ${imgRes.status}`);
+
+  const contentType = imgRes.headers.get("content-type") || "image/jpeg";
+  const buf = Buffer.from(await imgRes.arrayBuffer());
+  const base64 = buf.toString("base64");
+
+  const prompt = `You are a strict Amazon Merch on Demand reviewer.
+Check if this design is appropriate for minors (${fitType}). If it contains adult, sexual, violent, drug-related, hate, or mature themes, flag it.
+
+Return JSON ONLY:
+{
+  "youth_ok": true|false,
+  "issues": [
+    {
+      "type":"ADULT|SEXUAL|VIOLENCE|DRUGS|HATE|OTHER",
+      "message":"short reason"
+    }
+  ]
+}`;
+
+  const payload = {
+    contents: [
+      {
+        parts: [
+          { text: prompt },
+          {
+            inline_data: {
+              mime_type: contentType,
+              data: base64,
+            },
+          },
+        ],
+      },
+    ],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "OBJECT",
+        properties: {
+          youth_ok: { type: "BOOLEAN" },
+          issues: {
+            type: "ARRAY",
+            items: {
+              type: "OBJECT",
+              properties: {
+                type: { type: "STRING" },
+                message: { type: "STRING" },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await res.json();
+  if (!res.ok || data?.error) throw new Error(data?.error?.message || `Gemini HTTP ${res.status}`);
+
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("Gemini returned empty response");
+
+  return JSON.parse(text);
+}
+
 function buildHighlightsByField(issues: any[]) {
   const out: Record<string, string[]> = {};
   for (const it of issues || []) {
@@ -413,6 +523,8 @@ export async function POST(req: Request) {
     const enableText = !!options.enableTextCheck;
     const enablePolicy = !!options.enablePolicyCheck;
     const enableTm = !!options.enableTmCheck;
+    const fitType = String(body?.fitType || "none").trim().toLowerCase();
+    const requiresYouthCheck = fitType === "youth" || fitType === "girl" || fitType === "girls";
 
     if (!sheetUrl) {
       return NextResponse.json({ ok: false, error: "sheetUrl is empty" }, { status: 400, headers: cors(req) });
@@ -512,6 +624,19 @@ export async function POST(req: Request) {
 
     const tmhuntToBlock = new Set<string>();
     const geminiToWarn = new Set<string>();
+    const rowsByName = new Map<string, any>();
+
+    for (const r of rows) {
+      const n = String(r?.name || "").trim();
+      if (n) rowsByName.set(n, r);
+    }
+
+    const cachedRows = rowsByName.size
+      ? await PrecheckRow.find({ name: { $in: [...rowsByName.keys()] } }).lean()
+      : [];
+    const cachedByName = new Map<string, any>(
+      cachedRows.map((doc: any) => [String(doc?.name || "").trim(), doc])
+    );
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
@@ -520,6 +645,49 @@ export async function POST(req: Request) {
 
       let status: "PASS" | "WARN" | "BLOCK" = "PASS";
       const issues: any = {};
+      const rowHash = buildRowHash({ row: r, fitType, enableText, enablePolicy, enableTm });
+      const cached = cachedByName.get(String(name).trim());
+
+      if (
+        cached &&
+        cached.rowHash === rowHash &&
+        (cached.status === "PASS" || (cached.status === "WARN" && cached.continued))
+      ) {
+        status = cached.status === "WARN" ? "WARN" : "PASS";
+        if (cached.issues) Object.assign(issues, cached.issues);
+        results.push({ index: i, name, status, issues, cache: "HIT", continued: !!cached.continued });
+        if (status !== "BLOCK") {
+          rowsReady.push({
+            ...r,
+            rankedColors: [],
+            status,
+            issues,
+            cache: "HIT",
+            continued: !!cached.continued,
+          });
+        }
+        continue;
+      }
+
+      // 0) Youth/Girl image check (WARNING)
+      if (requiresYouthCheck && r?.image_url) {
+        try {
+          const res = await geminiYouthImageCheck(String(r.image_url), fitType);
+          if (!res?.youth_ok) {
+            status = "WARN";
+            issues.youthImage = {
+              issues: Array.isArray(res?.issues) ? res.issues : [],
+              message: "Design may not be suitable for minors. Review before continuing.",
+            };
+          }
+        } catch (e: any) {
+          status = "WARN";
+          issues.youthImage = {
+            issues: [],
+            message: "Youth image check failed (treated as WARNING): " + (e?.message || String(e)),
+          };
+        }
+      }
 
       // 1) Block words (hard stop)
       if (enableText) {
@@ -555,42 +723,8 @@ export async function POST(req: Request) {
         }
       }
 
-      // 3) Gemini policy => ALWAYS WARNING
-      if (enablePolicy) {
-        try {
-          const pr = await geminiPolicyCheck(r);
-          const policyOk = !!pr?.policy_ok;
-          if (!policyOk) {
-            if (status !== "BLOCK") status = "WARN";
-
-            const policyIssues = Array.isArray(pr?.policy_issues) ? pr.policy_issues : [];
-            issues.geminiPolicy = {
-              issues: policyIssues,
-              highlightsByField: buildHighlightsByField(policyIssues),
-              message: "Gemini flagged policy risks (WARNING). Review and Continue if acceptable.",
-            };
-
-            // ✅ auto-save to WarningWord (terms preferred, fallback evidence)
-            for (const it of policyIssues) {
-              const terms = Array.isArray(it?.terms) ? it.terms : [];
-              const ev = Array.isArray(it?.evidence) ? it.evidence : [];
-              const arr = (terms.length ? terms : ev).map((x: any) => norm(String(x))).filter(Boolean);
-              for (const t of arr) {
-                if (t && t.length <= 160 && !allowSet.has(t)) geminiToWarn.add(t);
-              }
-            }
-          }
-        } catch (e: any) {
-          if (status !== "BLOCK") status = "WARN";
-          issues.geminiPolicy = {
-            issues: [],
-            message: "Gemini policy check failed (treated as WARNING): " + (e?.message || String(e)),
-          };
-        }
-      }
-
-      // 4) TMHunt => BLOCK + auto-save BlockWord
-      if (enableTm) {
+      // 2) TMHunt => BLOCK + auto-save BlockWord
+      if (enableTm && status !== "BLOCK") {
         try {
           const tm = await callTMHunt(normalizedText);
           const liveTextMarks = uniq(extractLiveTextMarks(tm));
@@ -610,6 +744,40 @@ export async function POST(req: Request) {
         }
       }
 
+      // 3) Gemini policy => ALWAYS WARNING
+      if (enablePolicy && status !== "BLOCK") {
+        try {
+          const pr = await geminiPolicyCheck(r);
+          const policyOk = !!pr?.policy_ok;
+          if (!policyOk) {
+            status = "WARN";
+
+            const policyIssues = Array.isArray(pr?.policy_issues) ? pr.policy_issues : [];
+            issues.geminiPolicy = {
+              issues: policyIssues,
+              highlightsByField: buildHighlightsByField(policyIssues),
+              message: "Gemini flagged policy risks (WARNING). Review and Continue if acceptable.",
+            };
+
+            // ✅ auto-save to WarningWord (terms preferred, fallback evidence)
+            for (const it of policyIssues) {
+              const terms = Array.isArray(it?.terms) ? it.terms : [];
+              const ev = Array.isArray(it?.evidence) ? it.evidence : [];
+              const arr = (terms.length ? terms : ev).map((x: any) => norm(String(x))).filter(Boolean);
+              for (const t of arr) {
+                if (t && t.length <= 160 && !allowSet.has(t)) geminiToWarn.add(t);
+              }
+            }
+          }
+        } catch (e: any) {
+          status = "WARN";
+          issues.geminiPolicy = {
+            issues: [],
+            message: "Gemini policy check failed (treated as WARNING): " + (e?.message || String(e)),
+          };
+        }
+      }
+
       results.push({ index: i, name, status, issues });
 
       // only prepare rowsReady if NOT BLOCK
@@ -620,7 +788,27 @@ export async function POST(req: Request) {
         } catch {
           rankedColors = [];
         }
-        rowsReady.push({ ...r, rankedColors });
+        rowsReady.push({ ...r, rankedColors, status, issues, continued: false });
+      }
+
+      if (status === "PASS") {
+        await PrecheckRow.updateOne(
+          { name },
+          {
+            $set: {
+              name,
+              rowHash,
+              status: "PASS",
+              continued: false,
+              data: r,
+              issues: null,
+              fitType,
+              options: { enableText, enablePolicy, enableTm },
+              updatedAt: now,
+            },
+          },
+          { upsert: true }
+        );
       }
     }
 
