@@ -75,19 +75,14 @@ export async function POST(req: Request) {
     }
 
     const now = new Date();
-    const existing = await Word.findOne({ value }).lean();
-    if (existing) {
-      return NextResponse.json(
-        { ok: true, value, skipped: true, existingKind: existing.kind },
-        { headers: cors(req) }
-      );
-    }
 
-    // upsert allow word
-    await AllowWord.updateOne(
+    await Word.updateOne(
       { value },
-      { $setOnInsert: { value, createdAt: now }, $set: { lastSeenAt: now } },
-      { upsert: true }
+      {
+        $set: { kind: "AllowWord", source: "manual", lastSeenAt: now },
+        $setOnInsert: { value, createdAt: now, synonyms: [], hitCount: 0 },
+      },
+      { upsert: true, strict: false }
     );
 
     return NextResponse.json({ ok: true, value }, { headers: cors(req) });

@@ -43,26 +43,6 @@ async function loadCachedRows(rowsByName: Map<string, any>) {
   return new Map<string, any>(cachedRows.map((doc: any) => [String(doc?.name || "").trim(), doc]));
 }
 
-async function filterBlockCandidates(values: string[]) {
-  if (!values.length) return [];
-  const existing = await Word.find({ value: { $in: values } }, { value: 1, kind: 1 }).lean();
-  const kindByValue = new Map(existing.map((doc: any) => [String(doc.value), doc.kind]));
-  return values.filter((value) => {
-    const kind = kindByValue.get(value);
-    return !kind || kind === "BlockWord";
-  });
-}
-
-async function filterWarningCandidates(values: string[]) {
-  if (!values.length) return [];
-  const existing = await Word.find({ value: { $in: values } }, { value: 1, kind: 1 }).lean();
-  const kindByValue = new Map(existing.map((doc: any) => [String(doc.value), doc.kind]));
-  return values.filter((value) => {
-    const kind = kindByValue.get(value);
-    return !kind || kind === "WarningWord";
-  });
-}
-
 // -------------------- Image -> rankedColors (server) --------------------
 const COLOR_PALETTE: Record<string, { r: number; g: number; b: number }> = {
   asphalt: { r: 70, g: 74, b: 78 },
@@ -383,45 +363,39 @@ export async function POST(req: Request) {
     // ✅ bulk save TMHunt -> BlockWord
     if (tmhuntToBlock.size) {
       const arr = [...tmhuntToBlock];
-      const candidates = await filterBlockCandidates(arr);
-      if (candidates.length) {
-        await BlockWord.bulkWrite(
-          candidates.map((w) => ({
-            updateOne: {
-              filter: { value: w },
-              update: {
-                $setOnInsert: { value: w, source: "tmhunt", synonyms: [] },
-                $set: { lastSeenAt: now },
-                $inc: { hitCount: 1 },
-              },
-              upsert: true,
+      await Word.bulkWrite(
+        arr.map((w) => ({
+          updateOne: {
+            filter: { value: w },
+            update: {
+              $set: { kind: "BlockWord", lastSeenAt: now },
+              $setOnInsert: { value: w, source: "tmhunt", synonyms: [], hitCount: 0 },
+              $inc: { hitCount: 1 },
             },
-          })),
-          { ordered: false }
-        );
-      }
+            upsert: true,
+          },
+        })),
+        { ordered: false }
+      );
     }
 
     // ✅ bulk save Gemini -> WarningWord
     if (geminiToWarn.size) {
       const arr = [...geminiToWarn];
-      const candidates = await filterWarningCandidates(arr);
-      if (candidates.length) {
-        await WarningWord.bulkWrite(
-          candidates.map((w) => ({
-            updateOne: {
-              filter: { value: w },
-              update: {
-                $setOnInsert: { value: w, source: "gemini_policy", synonyms: [] },
-                $set: { lastSeenAt: now },
-                $inc: { hitCount: 1 },
-              },
-              upsert: true,
+      await Word.bulkWrite(
+        arr.map((w) => ({
+          updateOne: {
+            filter: { value: w },
+            update: {
+              $set: { kind: "WarningWord", lastSeenAt: now },
+              $setOnInsert: { value: w, source: "gemini_policy", synonyms: [], hitCount: 0 },
+              $inc: { hitCount: 1 },
             },
-          })),
-          { ordered: false }
-        );
-      }
+            upsert: true,
+          },
+        })),
+        { ordered: false }
+      );
     }
 
     const summary = {

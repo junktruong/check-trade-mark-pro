@@ -37,16 +37,6 @@ function uniq(arr: string[]) {
   return Array.from(new Set(arr));
 }
 
-async function filterBlockCandidates(values: string[]) {
-  if (!values.length) return [];
-  const existing = await Word.find({ value: { $in: values } }, { value: 1, kind: 1 }).lean();
-  const kindByValue = new Map(existing.map((doc: any) => [String(doc.value), doc.kind]));
-  return values.filter((value) => {
-    const kind = kindByValue.get(value);
-    return !kind || kind === "BlockWord";
-  });
-}
-
 function buildText(r: any) {
   return [r.brand, r.title, r.bullet1, r.bullet2, r.description]
     .filter(Boolean)
@@ -389,23 +379,20 @@ export async function POST(req: Request) {
         if (filtered.length) {
           // ✅ lưu vào DB (source tmhunt)
           const now = new Date();
-          const candidates = await filterBlockCandidates(filtered);
-          if (candidates.length) {
-            await BlockWord.bulkWrite(
-              candidates.map((w) => ({
-                updateOne: {
-                  filter: { value: w },
-                  update: {
-                    $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [] },
-                    $set: { lastSeenAt: now },
-                    $inc: { hitCount: 1 },
-                  },
-                  upsert: true,
+          await Word.bulkWrite(
+            filtered.map((w) => ({
+              updateOne: {
+                filter: { value: w },
+                update: {
+                  $set: { kind: "BlockWord", lastSeenAt: now },
+                  $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [], hitCount: 0 },
+                  $inc: { hitCount: 1 },
                 },
-              })),
-              { ordered: false }
-            );
-          }
+                upsert: true,
+              },
+            })),
+            { ordered: false }
+          );
 
           const fail = {
             ok: false,

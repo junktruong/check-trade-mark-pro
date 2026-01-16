@@ -56,22 +56,22 @@ export async function PATCH(req: Request) {
   const value = norm(body?.value);
   const addRaw = Array.isArray(body?.add) ? body.add : [];
   const removeRaw = Array.isArray(body?.remove) ? body.remove : [];
+  const now = new Date();
 
   if (!value) return NextResponse.json({ ok: false, error: "value is empty" }, { status: 400 });
-
-  const existing = await Word.findOne({ value }).lean();
-  if (existing && existing.kind !== "WarningWord") {
-    return NextResponse.json({ ok: true, skipped: true, existingKind: existing.kind, word: null });
-  }
 
   const add = uniq(addRaw.map(norm).filter(Boolean)).filter((x) => x !== value);
   const remove = uniq(removeRaw.map(norm).filter(Boolean));
 
   if (remove.length) {
-    const w = await WarningWord.findOneAndUpdate(
+    const w = await Word.findOneAndUpdate(
       { value },
-      { $pull: { synonyms: { $in: remove } } },
-      { new: true, upsert: true }
+      {
+        $set: { kind: "WarningWord", source: "manual", lastSeenAt: now },
+        $setOnInsert: { value, createdAt: now, synonyms: [], hitCount: 0 },
+        $pull: { synonyms: { $in: remove } },
+      },
+      { new: true, upsert: true, strict: false }
     ).lean();
     return NextResponse.json({ ok: true, word: w });
   }
@@ -86,13 +86,14 @@ export async function PATCH(req: Request) {
   const rejected = add.filter((s) => liveSet.has(s)).map((s) => ({ value: s, liveMarks: [s] }));
 
   if (accepted.length) {
-    await WarningWord.updateOne(
+    await Word.updateOne(
       { value },
       {
-        $setOnInsert: { value, source: "manual" },
+        $set: { kind: "WarningWord", source: "manual", lastSeenAt: now },
+        $setOnInsert: { value, createdAt: now, synonyms: [], hitCount: 0 },
         $addToSet: { synonyms: { $each: accepted } },
       },
-      { upsert: true }
+      { upsert: true, strict: false }
     );
   }
 
