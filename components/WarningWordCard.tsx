@@ -24,11 +24,15 @@ function norm(s: string) {
 export default function WarningWordCard({
   value,
   busy,
+  selected,
+  onSelect,
   onDelete,
   onMove,
 }: {
   value: string;
   busy?: boolean;
+  selected?: boolean;
+  onSelect?: () => void;
   onDelete: (value: string) => Promise<void> | void;
   onMove: (value: string, to: "allow" | "warning" | "block") => Promise<void> | void;
 }) {
@@ -115,6 +119,15 @@ export default function WarningWordCard({
   return (
     <div className="group rounded-xl border border-amber-100 bg-white shadow-sm hover:shadow-md transition-all">
       <div className="flex items-center justify-between gap-3 p-3">
+        <div className="pt-0.5">
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onChange={onSelect}
+            disabled={busy}
+            className="accent-amber-500"
+          />
+        </div>
         <button onClick={() => setOpen((x) => !x)} className="flex-1 text-left" title="Mở rộng">
           <div className="flex items-center gap-2">
             <span className="font-semibold text-gray-800">{value}</span>

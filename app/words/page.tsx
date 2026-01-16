@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import BlockWordCard from "@/components/BlockWordCard";
 import WarningWordCard from "@/components/WarningWordCard";
 
@@ -15,6 +15,34 @@ export default function WordsPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<Record<"allow" | "warning" | "block", Set<string>>>({
+    allow: new Set(),
+    warning: new Set(),
+    block: new Set(),
+  });
+  const [visibleCount, setVisibleCount] = useState<Record<"allow" | "warning" | "block", number>>({
+    allow: 24,
+    warning: 24,
+    block: 24,
+  });
+
+  const normalizedQuery = query.trim().toLowerCase();
+
+  const filteredAllow = useMemo(() => {
+    if (!normalizedQuery) return allow;
+    return allow.filter((w) => w.toLowerCase().includes(normalizedQuery));
+  }, [allow, normalizedQuery]);
+
+  const filteredWarning = useMemo(() => {
+    if (!normalizedQuery) return warning;
+    return warning.filter((w) => w.toLowerCase().includes(normalizedQuery));
+  }, [warning, normalizedQuery]);
+
+  const filteredBlock = useMemo(() => {
+    if (!normalizedQuery) return block;
+    return block.filter((w) => w.toLowerCase().includes(normalizedQuery));
+  }, [block, normalizedQuery]);
 
   function pop(msg: string) {
     setToast(msg);
@@ -95,13 +123,73 @@ export default function WordsPage() {
     load();
   }, []);
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center">
-        <div className="rounded-full h-24 w-24 border-t-4 border-blue-600 border-solid animate-spin"></div>
-        <h2 className="mt-5 text-xl font-semibold text-gray-600 animate-pulse">Đang tải dữ liệu...</h2>
-      </div>
-    );
+  useEffect(() => {
+    if (!normalizedQuery) return;
+    setVisibleCount({ allow: 24, warning: 24, block: 24 });
+  }, [normalizedQuery]);
+
+  function toggleSelect(typeKey: "allow" | "warning" | "block", value: string) {
+    setSelected((prev) => {
+      const next = { ...prev, [typeKey]: new Set(prev[typeKey]) };
+      if (next[typeKey].has(value)) {
+        next[typeKey].delete(value);
+      } else {
+        next[typeKey].add(value);
+      }
+      return next;
+    });
+  }
+
+  function setSelectAll(typeKey: "allow" | "warning" | "block", values: string[], checked: boolean) {
+    setSelected((prev) => ({
+      ...prev,
+      [typeKey]: checked ? new Set(values) : new Set(),
+    }));
+  }
+
+  function clearSelection(typeKey: "allow" | "warning" | "block") {
+    setSelected((prev) => ({ ...prev, [typeKey]: new Set() }));
+  }
+
+  async function bulkDelete(typeKey: "allow" | "warning" | "block") {
+    const items = Array.from(selected[typeKey]);
+    if (!items.length) return;
+    setBusy(true);
+    try {
+      await Promise.all(
+        items.map((value) =>
+          fetch(`/api/words?type=${typeKey}&value=${encodeURIComponent(value)}`, { method: "DELETE" })
+        )
+      );
+      await load();
+      clearSelection(typeKey);
+      pop(`🗑️ Deleted ${items.length}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function bulkMove(typeKey: "allow" | "warning" | "block", to: "allow" | "warning" | "block") {
+    const items = Array.from(selected[typeKey]);
+    if (!items.length) return;
+    if (typeKey === to) return;
+    setBusy(true);
+    try {
+      await Promise.all(
+        items.map((value) =>
+          fetch("/api/words", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type: to, value }),
+          })
+        )
+      );
+      await load();
+      clearSelection(typeKey);
+      pop(`🔁 Moved ${items.length} → ${to.toUpperCase()}`);
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -119,6 +207,12 @@ export default function WordsPage() {
             <div className="flex-1">
               <h1 className="text-3xl font-bold text-gray-800">Words Manager</h1>
               <p className="text-gray-500 mt-1">Allow / Warning / Block + synonyms + clear precheck cache</p>
+              {busy && (
+                <div className="mt-3 inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+                  <span className="h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
+                  Đang xử lý...
+                </div>
+              )}
             </div>
 
             <button
@@ -167,6 +261,23 @@ export default function WordsPage() {
               Add / Move
             </button>
           </div>
+
+          <div className="mt-4 flex flex-col sm:flex-row gap-3">
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Tìm từ khóa..."
+              className="flex-1 px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              disabled={busy}
+            />
+            <button
+              onClick={() => setQuery("")}
+              className="px-4 py-2.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+              disabled={!query || busy}
+            >
+              Clear search
+            </button>
+          </div>
         </div>
 
         {/* Lists */}
@@ -176,47 +287,113 @@ export default function WordsPage() {
             <div className="flex items-center gap-2 mb-5">
               <h2 className="text-xl font-bold text-gray-800">Allowlist</h2>
               <span className="ml-auto bg-emerald-100 text-emerald-700 text-xs font-bold px-2.5 py-1 rounded-full">
-                {allow.length}
+                {filteredAllow.length}
               </span>
             </div>
 
-            <ul className="space-y-2">
-              {allow.map((w) => (
-                <li
-                  key={w}
-                  className="group flex items-center justify-between gap-2 p-3 bg-white border border-emerald-100 rounded-xl shadow-sm hover:shadow-md transition-all"
+            <div className="flex flex-col gap-2 mb-4">
+              <div className="flex items-center gap-2 text-xs text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={selected.allow.size > 0 && selected.allow.size === filteredAllow.length}
+                  onChange={(e) => setSelectAll("allow", filteredAllow, e.target.checked)}
+                  disabled={!filteredAllow.length || busy}
+                />
+                <span>Chọn tất cả ({selected.allow.size})</span>
+                <button
+                  onClick={() => bulkDelete("allow")}
+                  disabled={!selected.allow.size || busy}
+                  className="ml-auto px-2 py-1 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
                 >
-                  <span className="font-medium text-gray-700">{w}</span>
+                  Xoá chọn
+                </button>
+                <select
+                  className="text-xs px-2 py-1 rounded-lg border border-gray-200 bg-gray-50"
+                  defaultValue=""
+                  onChange={(e) => {
+                    const v = e.target.value as any;
+                    if (v) bulkMove("allow", v);
+                    e.currentTarget.value = "";
+                  }}
+                  disabled={!selected.allow.size || busy}
+                  title="Move selected to"
+                >
+                  <option value="">Chuyển chọn…</option>
+                  <option value="warning">⚠️ Warning</option>
+                  <option value="block">🚫 Block</option>
+                </select>
+              </div>
+            </div>
 
-                  <div className="flex items-center gap-2">
-                    <select
-                      className="text-xs px-2 py-1 rounded-lg border border-gray-200 bg-gray-50"
-                      defaultValue=""
-                      onChange={(e) => {
-                        const v = e.target.value as any;
-                        if (v) moveWord(w, v);
-                        e.currentTarget.value = "";
-                      }}
-                      disabled={busy}
-                      title="Move to"
+            {loading ? (
+              <div className="space-y-3">
+                {Array.from({ length: 6 }).map((_, idx) => (
+                  <div key={idx} className="h-12 rounded-xl bg-white/70 border border-emerald-100 animate-pulse" />
+                ))}
+              </div>
+            ) : (
+              <>
+                <ul className="space-y-2">
+                  {filteredAllow.slice(0, visibleCount.allow).map((w) => (
+                    <li
+                      key={w}
+                      className="group flex items-center justify-between gap-2 p-3 bg-white border border-emerald-100 rounded-xl shadow-sm hover:shadow-md transition-all"
                     >
-                      <option value="">Move…</option>
-                      <option value="warning">⚠️ Warning</option>
-                      <option value="block">🚫 Block</option>
-                    </select>
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={selected.allow.has(w)}
+                          onChange={() => toggleSelect("allow", w)}
+                          disabled={busy}
+                        />
+                        <span className="font-medium text-gray-700">{w}</span>
+                      </label>
 
-                    <button
-                      onClick={() => delWord("allow", w)}
-                      className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                      disabled={busy}
-                      title="Delete"
-                    >
-                      🗑️
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
+                      <div className="flex items-center gap-2">
+                        <select
+                          className="text-xs px-2 py-1 rounded-lg border border-gray-200 bg-gray-50"
+                          defaultValue=""
+                          onChange={(e) => {
+                            const v = e.target.value as any;
+                            if (v) moveWord(w, v);
+                            e.currentTarget.value = "";
+                          }}
+                          disabled={busy}
+                          title="Move to"
+                        >
+                          <option value="">Move…</option>
+                          <option value="warning">⚠️ Warning</option>
+                          <option value="block">🚫 Block</option>
+                        </select>
+
+                        <button
+                          onClick={() => delWord("allow", w)}
+                          className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                          disabled={busy}
+                          title="Delete"
+                        >
+                          🗑️
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                {filteredAllow.length > visibleCount.allow && (
+                  <button
+                    onClick={() =>
+                      setVisibleCount((prev) => ({ ...prev, allow: prev.allow + 24 }))
+                    }
+                    className="mt-4 w-full rounded-lg border border-emerald-200 py-2 text-sm font-semibold text-emerald-700 hover:bg-emerald-50"
+                    disabled={busy}
+                  >
+                    Xem thêm
+                  </button>
+                )}
+                {!filteredAllow.length && !loading && (
+                  <div className="text-sm text-gray-500 mt-3">Không có kết quả.</div>
+                )}
+              </>
+            )}
           </div>
 
           {/* Warning */}
@@ -224,21 +401,81 @@ export default function WordsPage() {
             <div className="flex items-center gap-2 mb-5">
               <h2 className="text-xl font-bold text-gray-800">Warninglist</h2>
               <span className="ml-auto bg-amber-100 text-amber-800 text-xs font-bold px-2.5 py-1 rounded-full">
-                {warning.length}
+                {filteredWarning.length}
               </span>
             </div>
 
-            <div className="space-y-2">
-              {warning.map((w) => (
-                <WarningWordCard
-                  key={w}
-                  value={w}
-                  busy={busy}
-                  onDelete={async (val) => delWord("warning", val)}
-                  onMove={async (val, to) => moveWord(val, to)}
+            <div className="flex flex-col gap-2 mb-4">
+              <div className="flex items-center gap-2 text-xs text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={selected.warning.size > 0 && selected.warning.size === filteredWarning.length}
+                  onChange={(e) => setSelectAll("warning", filteredWarning, e.target.checked)}
+                  disabled={!filteredWarning.length || busy}
                 />
-              ))}
+                <span>Chọn tất cả ({selected.warning.size})</span>
+                <button
+                  onClick={() => bulkDelete("warning")}
+                  disabled={!selected.warning.size || busy}
+                  className="ml-auto px-2 py-1 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  Xoá chọn
+                </button>
+                <select
+                  className="text-xs px-2 py-1 rounded-lg border border-gray-200 bg-gray-50"
+                  defaultValue=""
+                  onChange={(e) => {
+                    const v = e.target.value as any;
+                    if (v) bulkMove("warning", v);
+                    e.currentTarget.value = "";
+                  }}
+                  disabled={!selected.warning.size || busy}
+                  title="Move selected to"
+                >
+                  <option value="">Chuyển chọn…</option>
+                  <option value="allow">✅ Allow</option>
+                  <option value="block">🚫 Block</option>
+                </select>
+              </div>
             </div>
+
+            {loading ? (
+              <div className="space-y-3">
+                {Array.from({ length: 6 }).map((_, idx) => (
+                  <div key={idx} className="h-16 rounded-xl bg-white/70 border border-amber-100 animate-pulse" />
+                ))}
+              </div>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  {filteredWarning.slice(0, visibleCount.warning).map((w) => (
+                    <WarningWordCard
+                      key={w}
+                      value={w}
+                      busy={busy}
+                      selected={selected.warning.has(w)}
+                      onSelect={() => toggleSelect("warning", w)}
+                      onDelete={async (val) => delWord("warning", val)}
+                      onMove={async (val, to) => moveWord(val, to)}
+                    />
+                  ))}
+                </div>
+                {filteredWarning.length > visibleCount.warning && (
+                  <button
+                    onClick={() =>
+                      setVisibleCount((prev) => ({ ...prev, warning: prev.warning + 24 }))
+                    }
+                    className="mt-4 w-full rounded-lg border border-amber-200 py-2 text-sm font-semibold text-amber-700 hover:bg-amber-50"
+                    disabled={busy}
+                  >
+                    Xem thêm
+                  </button>
+                )}
+                {!filteredWarning.length && !loading && (
+                  <div className="text-sm text-gray-500 mt-3">Không có kết quả.</div>
+                )}
+              </>
+            )}
           </div>
 
           {/* Block */}
@@ -246,21 +483,81 @@ export default function WordsPage() {
             <div className="flex items-center gap-2 mb-5">
               <h2 className="text-xl font-bold text-gray-800">Blocklist</h2>
               <span className="ml-auto bg-rose-100 text-rose-700 text-xs font-bold px-2.5 py-1 rounded-full">
-                {block.length}
+                {filteredBlock.length}
               </span>
             </div>
 
-            <div className="space-y-2">
-              {block.map((w) => (
-                <BlockWordCard
-                  key={w}
-                  value={w}
-                  busy={busy}
-                  onDelete={async (val) => delWord("block", val)}
-                  onMove={async (val, to) => moveWord(val, to)}
+            <div className="flex flex-col gap-2 mb-4">
+              <div className="flex items-center gap-2 text-xs text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={selected.block.size > 0 && selected.block.size === filteredBlock.length}
+                  onChange={(e) => setSelectAll("block", filteredBlock, e.target.checked)}
+                  disabled={!filteredBlock.length || busy}
                 />
-              ))}
+                <span>Chọn tất cả ({selected.block.size})</span>
+                <button
+                  onClick={() => bulkDelete("block")}
+                  disabled={!selected.block.size || busy}
+                  className="ml-auto px-2 py-1 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  Xoá chọn
+                </button>
+                <select
+                  className="text-xs px-2 py-1 rounded-lg border border-gray-200 bg-gray-50"
+                  defaultValue=""
+                  onChange={(e) => {
+                    const v = e.target.value as any;
+                    if (v) bulkMove("block", v);
+                    e.currentTarget.value = "";
+                  }}
+                  disabled={!selected.block.size || busy}
+                  title="Move selected to"
+                >
+                  <option value="">Chuyển chọn…</option>
+                  <option value="allow">✅ Allow</option>
+                  <option value="warning">⚠️ Warning</option>
+                </select>
+              </div>
             </div>
+
+            {loading ? (
+              <div className="space-y-3">
+                {Array.from({ length: 6 }).map((_, idx) => (
+                  <div key={idx} className="h-16 rounded-xl bg-white/70 border border-rose-100 animate-pulse" />
+                ))}
+              </div>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  {filteredBlock.slice(0, visibleCount.block).map((w) => (
+                    <BlockWordCard
+                      key={w}
+                      value={w}
+                      busy={busy}
+                      selected={selected.block.has(w)}
+                      onSelect={() => toggleSelect("block", w)}
+                      onDelete={async (val) => delWord("block", val)}
+                      onMove={async (val, to) => moveWord(val, to)}
+                    />
+                  ))}
+                </div>
+                {filteredBlock.length > visibleCount.block && (
+                  <button
+                    onClick={() =>
+                      setVisibleCount((prev) => ({ ...prev, block: prev.block + 24 }))
+                    }
+                    className="mt-4 w-full rounded-lg border border-rose-200 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-50"
+                    disabled={busy}
+                  >
+                    Xem thêm
+                  </button>
+                )}
+                {!filteredBlock.length && !loading && (
+                  <div className="text-sm text-gray-500 mt-3">Không có kết quả.</div>
+                )}
+              </>
+            )}
           </div>
         </div>
       </div>
