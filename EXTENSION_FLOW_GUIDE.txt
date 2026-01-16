@@ -1,0 +1,61 @@
+Extension ↔ Server Flow (Next.js API)
+
+1) Precheck from Google Sheet
+Endpoint: POST /api/precheck/sheet
+Body example:
+{
+  "sheetUrl": "https://docs.google.com/spreadsheets/d/.../edit#gid=0",
+  "fitType": "youth|girl|none",
+  "options": {
+    "enableTextCheck": true,
+    "enableTmCheck": true,
+    "enablePolicyCheck": true
+  }
+}
+
+Behavior (order of checks):
+P0) If fitType is "youth" or "girl":
+    - The server calls Gemini Vision to review the design image for minors.
+    - If risky, the row becomes WARNING (continue allowed).
+P1) Block/Warning words from DB:
+    - If any BLOCK word matches, the row is BLOCK immediately.
+    - WARNING words set row to WARNING.
+P2) TMHunt check:
+    - If LIVE TEXT marks exist, the row is BLOCK.
+P3) Gemini policy text check:
+    - If policy issues exist, the row is WARNING.
+
+Response:
+- results[] always includes: { index, name, status: PASS|WARN|BLOCK, issues }
+- rowsReady[] includes PASS + WARN rows for extension sidebar (also includes status, issues, continued)
+- canContinue = true when there are WARNING rows but no BLOCK rows.
+
+2) Continue a WARNING row (store it so next run can skip re-check)
+Endpoint: POST /api/precheck/continue
+Body example:
+{
+  "fitType": "youth|girl|none",
+  "options": {
+    "enableTextCheck": true,
+    "enableTmCheck": true,
+    "enablePolicyCheck": true
+  },
+  "row": {
+    "name": "Row 1",
+    "brand": "...",
+    "title": "...",
+    "bullet1": "...",
+    "bullet2": "...",
+    "description": "...",
+    "price": "...",
+    "image_url": "...",
+    "thumbnail_url": "..."
+  },
+  "issues": { ... } // optional, for debugging
+}
+
+Notes:
+- The server stores PASS rows automatically.
+- WARNING rows are stored only after you call /api/precheck/continue.
+- When reloading CSV, if a row's "name" exists and the data hash is unchanged,
+  the server reuses cached PASS/WARN (continued) and skips external calls.
