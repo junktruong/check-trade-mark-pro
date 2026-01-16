@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectMongo } from "@/lib/mongo";
-import { AllowWord } from "@/models/Words";
+import { AllowWord, Word } from "@/models/Words";
 
 export const runtime = "nodejs";
 
@@ -76,11 +76,13 @@ export async function POST(req: Request) {
 
     const now = new Date();
 
-    // upsert allow word
-    await AllowWord.updateOne(
+    await Word.updateOne(
       { value },
-      { $setOnInsert: { value, createdAt: now }, $set: { lastSeenAt: now } },
-      { upsert: true }
+      {
+        $set: { kind: "AllowWord", source: "manual", lastSeenAt: now },
+        $setOnInsert: { value, createdAt: now, synonyms: [], hitCount: 0 },
+      },
+      { upsert: true, strict: false }
     );
 
     return NextResponse.json({ ok: true, value }, { headers: cors(req) });

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { connectMongo } from "@/lib/mongo";
-import { AllowWord, BlockWord } from "@/models/Words";
+import { AllowWord, BlockWord, Word } from "@/models/Words";
 import { PrecheckCache } from "@/models/PrecheckCache";
 import { callTMHunt } from "@/lib/tmhunt";
 
@@ -379,13 +379,13 @@ export async function POST(req: Request) {
         if (filtered.length) {
           // ✅ lưu vào DB (source tmhunt)
           const now = new Date();
-          await BlockWord.bulkWrite(
+          await Word.bulkWrite(
             filtered.map((w) => ({
               updateOne: {
                 filter: { value: w },
                 update: {
-                  $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [] },
-                  $set: { lastSeenAt: now },
+                  $set: { kind: "BlockWord", lastSeenAt: now },
+                  $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [], hitCount: 0 },
                   $inc: { hitCount: 1 },
                 },
                 upsert: true,

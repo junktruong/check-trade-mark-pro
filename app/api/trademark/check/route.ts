@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectMongo } from "@/lib/mongo";
-import { AllowWord, BlockWord } from "@/models/Words";
+import { AllowWord, BlockWord, Word } from "@/models/Words";
 import { callTMHunt } from "@/lib/tmhunt";
 
 function norm(s: any) {
@@ -30,13 +30,13 @@ export async function POST(req: Request) {
     if (denyHit.length > 0) {
       // optional: tăng hitCount + lastSeenAt (không bắt buộc)
       const now = new Date();
-      await BlockWord.bulkWrite(
+      await Word.bulkWrite(
         denyHit.map((w) => ({
           updateOne: {
             filter: { value: w },
             update: {
-              $setOnInsert: { value: w, source: "manual", createdAt: now },
-              $set: { lastSeenAt: now }, // ✅ không set source ở đây để khỏi conflict
+              $set: { kind: "BlockWord", lastSeenAt: now },
+              $setOnInsert: { value: w, source: "manual", createdAt: now, synonyms: [], hitCount: 0 },
               $inc: { hitCount: 1 },
             },
             upsert: true,
@@ -69,13 +69,13 @@ export async function POST(req: Request) {
       const now = new Date();
 
       // ✅ lưu từng từ vào DB, không conflict field source
-      await BlockWord.bulkWrite(
+      await Word.bulkWrite(
         filtered.map((w) => ({
           updateOne: {
             filter: { value: w },
             update: {
-              $setOnInsert: { value: w, source: "tmhunt", createdAt: now },
-              $set: { lastSeenAt: now }, // ✅ bỏ source ở $set
+              $set: { kind: "BlockWord", lastSeenAt: now },
+              $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [], hitCount: 0 },
               $inc: { hitCount: 1 },
             },
             upsert: true,
