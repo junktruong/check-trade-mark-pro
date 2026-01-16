@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectMongo } from "@/lib/mongo";
-import { BlockWord } from "@/models/Words";
+import { WarningWord } from "@/models/Words";
 import { callTMHunt } from "@/lib/tmhunt";
 
 function norm(s: any) {
@@ -18,8 +18,6 @@ function extractLiveTextMarks(tm: any): string[] {
   const out: string[] = [];
   for (const x of src) {
     if (!x) continue;
-
-    // ❌ bỏ string (không có status/type)
     if (typeof x === "string") continue;
 
     if (Array.isArray(x)) {
@@ -47,7 +45,7 @@ export async function GET(req: Request) {
 
   if (!value) return NextResponse.json({ ok: false, error: "value is empty" }, { status: 400 });
 
-  const word = await BlockWord.findOne({ value }).lean();
+  const word = await WarningWord.findOne({ value }).lean();
   return NextResponse.json({ ok: true, word: word || null });
 }
 
@@ -64,9 +62,8 @@ export async function PATCH(req: Request) {
   const add = uniq(addRaw.map(norm).filter(Boolean)).filter((x) => x !== value);
   const remove = uniq(removeRaw.map(norm).filter(Boolean));
 
-  // remove
   if (remove.length) {
-    const w = await BlockWord.findOneAndUpdate(
+    const w = await WarningWord.findOneAndUpdate(
       { value },
       { $pull: { synonyms: { $in: remove } } },
       { new: true, upsert: true }
@@ -76,7 +73,6 @@ export async function PATCH(req: Request) {
 
   if (!add.length) return NextResponse.json({ ok: true, accepted: [], rejected: [], word: null });
 
-  // ✅ check TMHunt LIVE+TEXT
   const tm = await callTMHunt(add.join(" "));
   const live = extractLiveTextMarks(tm);
   const liveSet = new Set(live);
@@ -85,7 +81,7 @@ export async function PATCH(req: Request) {
   const rejected = add.filter((s) => liveSet.has(s)).map((s) => ({ value: s, liveMarks: [s] }));
 
   if (accepted.length) {
-    await BlockWord.updateOne(
+    await WarningWord.updateOne(
       { value },
       {
         $setOnInsert: { value, source: "manual" },
@@ -95,6 +91,6 @@ export async function PATCH(req: Request) {
     );
   }
 
-  const w = await BlockWord.findOne({ value }).lean();
+  const w = await WarningWord.findOne({ value }).lean();
   return NextResponse.json({ ok: true, accepted, rejected, word: w });
 }

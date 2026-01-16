@@ -21,7 +21,7 @@ function norm(s: string) {
   return s.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-export default function BlockWordCard({
+export default function WarningWordCard({
   value,
   busy,
   onDelete,
@@ -45,7 +45,7 @@ export default function BlockWordCard({
   async function loadMeta() {
     setLoading(true);
     try {
-      const res = await fetch(`/api/words/block?value=${encodeURIComponent(v)}`);
+      const res = await fetch(`/api/words/warning?value=${encodeURIComponent(v)}`);
       const data = await res.json();
       if (data?.ok) setMeta(data.word);
     } finally {
@@ -65,7 +65,7 @@ export default function BlockWordCard({
     setNotice(null);
     setSynBusy(true);
     try {
-      const res = await fetch("/api/words/block", {
+      const res = await fetch("/api/words/warning", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ value: v, add }),
@@ -98,7 +98,7 @@ export default function BlockWordCard({
     setNotice(null);
     setSynBusy(true);
     try {
-      const res = await fetch("/api/words/block", {
+      const res = await fetch("/api/words/warning", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ value: v, remove: [s] }),
@@ -113,13 +113,13 @@ export default function BlockWordCard({
   const synonyms = meta?.synonyms || [];
 
   return (
-    <div className="group rounded-xl border border-rose-100 bg-white shadow-sm hover:shadow-md transition-all">
+    <div className="group rounded-xl border border-amber-100 bg-white shadow-sm hover:shadow-md transition-all">
       <div className="flex items-center justify-between gap-3 p-3">
         <button onClick={() => setOpen((x) => !x)} className="flex-1 text-left" title="Mở rộng">
           <div className="flex items-center gap-2">
             <span className="font-semibold text-gray-800">{value}</span>
-            <span className="text-[11px] px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-100">
-              BLOCK
+            <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-100">
+              WARNING
             </span>
             {meta?.source ? (
               <span className="text-[11px] px-2 py-0.5 rounded-full bg-gray-50 text-gray-600 border border-gray-100">
@@ -148,7 +148,7 @@ export default function BlockWordCard({
           >
             <option value="">Move…</option>
             <option value="allow">✅ Allow</option>
-            <option value="warning">⚠️ Warning</option>
+            <option value="block">🚫 Block</option>
           </select>
 
           <button
@@ -180,11 +180,11 @@ export default function BlockWordCard({
                     synonyms.map((s) => (
                       <span
                         key={s}
-                        className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full border bg-rose-50/40 border-rose-100 text-rose-800"
+                        className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full border bg-amber-50/40 border-amber-100 text-amber-900"
                       >
                         {s}
                         <button
-                          className="ml-1 text-rose-500 hover:text-rose-700"
+                          className="ml-1 text-amber-600 hover:text-amber-800"
                           onClick={() => removeSynonym(s)}
                           disabled={synBusy}
                           title="Xoá synonym"
@@ -209,7 +209,7 @@ export default function BlockWordCard({
                       }
                     }}
                     placeholder="Thêm synonym (Enter)…"
-                    className="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-rose-300"
+                    className="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-300"
                     disabled={synBusy}
                   />
                   <button
@@ -220,7 +220,7 @@ export default function BlockWordCard({
                     disabled={!newSyn.trim() || synBusy}
                     className={`px-4 py-2 rounded-lg font-semibold text-white transition-all ${
                       newSyn.trim() && !synBusy
-                        ? "bg-rose-600 hover:bg-rose-700"
+                        ? "bg-amber-600 hover:bg-amber-700"
                         : "bg-gray-300 cursor-not-allowed"
                     }`}
                   >

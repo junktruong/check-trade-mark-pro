@@ -2,12 +2,15 @@
 
 import { useEffect, useState } from "react";
 import BlockWordCard from "@/components/BlockWordCard";
+import WarningWordCard from "@/components/WarningWordCard";
 
 export default function WordsPage() {
   const [allow, setAllow] = useState<string[]>([]);
+  const [warning, setWarning] = useState<string[]>([]);
   const [block, setBlock] = useState<string[]>([]);
+
   const [newWord, setNewWord] = useState("");
-  const [type, setType] = useState<"allow" | "block">("allow");
+  const [type, setType] = useState<"allow" | "warning" | "block">("allow");
 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -24,9 +27,10 @@ export default function WordsPage() {
       const res = await fetch("/api/words");
       const data = await res.json();
       setAllow(data.allow || []);
+      setWarning(data.warning || []);
       setBlock(data.block || []);
     } finally {
-      setTimeout(() => setLoading(false), 200);
+      setTimeout(() => setLoading(false), 150);
     }
   }
 
@@ -41,18 +45,33 @@ export default function WordsPage() {
       });
       setNewWord("");
       await load();
-      pop("✅ Added");
+      pop("✅ Added / Moved");
     } finally {
       setBusy(false);
     }
   }
 
-  async function delWord(t: "allow" | "block", value: string) {
+  async function delWord(t: "allow" | "warning" | "block", value: string) {
     setBusy(true);
     try {
       await fetch(`/api/words?type=${t}&value=${encodeURIComponent(value)}`, { method: "DELETE" });
       await load();
       pop("🗑️ Deleted");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function moveWord(value: string, to: "allow" | "warning" | "block") {
+    setBusy(true);
+    try {
+      await fetch("/api/words", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: to, value }),
+      });
+      await load();
+      pop(`🔁 Moved → ${to.toUpperCase()}`);
     } finally {
       setBusy(false);
     }
@@ -93,13 +112,13 @@ export default function WordsPage() {
         </div>
       )}
 
-      <div className="max-w-6xl mx-auto bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
+      <div className="max-w-7xl mx-auto bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
         {/* Header */}
         <div className="p-7 border-b border-gray-100">
           <div className="flex flex-col md:flex-row md:items-center gap-4">
             <div className="flex-1">
               <h1 className="text-3xl font-bold text-gray-800">Words Manager</h1>
-              <p className="text-gray-500 mt-1">Allowlist / Blocklist + synonyms + clear precheck cache</p>
+              <p className="text-gray-500 mt-1">Allow / Warning / Block + synonyms + clear precheck cache</p>
             </div>
 
             <button
@@ -114,7 +133,7 @@ export default function WordsPage() {
             </button>
           </div>
 
-          {/* Add word */}
+          {/* Add / move word */}
           <div className="mt-6 flex flex-col sm:flex-row gap-3">
             <input
               value={newWord}
@@ -132,6 +151,7 @@ export default function WordsPage() {
               disabled={busy}
             >
               <option value="allow">✅ Allow</option>
+              <option value="warning">⚠️ Warning</option>
               <option value="block">🚫 Block</option>
             </select>
 
@@ -144,14 +164,14 @@ export default function WordsPage() {
                   : "bg-gray-300 cursor-not-allowed"
               }`}
             >
-              Add
+              Add / Move
             </button>
           </div>
         </div>
 
         {/* Lists */}
-        <div className="grid grid-cols-1 md:grid-cols-2">
-          {/* Allowed */}
+        <div className="grid grid-cols-1 md:grid-cols-3">
+          {/* Allow */}
           <div className="p-7 border-b md:border-b-0 md:border-r border-gray-100 bg-emerald-50/30">
             <div className="flex items-center gap-2 mb-5">
               <h2 className="text-xl font-bold text-gray-800">Allowlist</h2>
@@ -164,23 +184,64 @@ export default function WordsPage() {
               {allow.map((w) => (
                 <li
                   key={w}
-                  className="group flex items-center justify-between p-3 bg-white border border-emerald-100 rounded-xl shadow-sm hover:shadow-md transition-all"
+                  className="group flex items-center justify-between gap-2 p-3 bg-white border border-emerald-100 rounded-xl shadow-sm hover:shadow-md transition-all"
                 >
                   <span className="font-medium text-gray-700">{w}</span>
-                  <button
-                    onClick={() => delWord("allow", w)}
-                    className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                    disabled={busy}
-                    title="Delete"
-                  >
-                    🗑️
-                  </button>
+
+                  <div className="flex items-center gap-2">
+                    <select
+                      className="text-xs px-2 py-1 rounded-lg border border-gray-200 bg-gray-50"
+                      defaultValue=""
+                      onChange={(e) => {
+                        const v = e.target.value as any;
+                        if (v) moveWord(w, v);
+                        e.currentTarget.value = "";
+                      }}
+                      disabled={busy}
+                      title="Move to"
+                    >
+                      <option value="">Move…</option>
+                      <option value="warning">⚠️ Warning</option>
+                      <option value="block">🚫 Block</option>
+                    </select>
+
+                    <button
+                      onClick={() => delWord("allow", w)}
+                      className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                      disabled={busy}
+                      title="Delete"
+                    >
+                      🗑️
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
           </div>
 
-          {/* Blocked */}
+          {/* Warning */}
+          <div className="p-7 border-b md:border-b-0 md:border-r border-gray-100 bg-amber-50/30">
+            <div className="flex items-center gap-2 mb-5">
+              <h2 className="text-xl font-bold text-gray-800">Warninglist</h2>
+              <span className="ml-auto bg-amber-100 text-amber-800 text-xs font-bold px-2.5 py-1 rounded-full">
+                {warning.length}
+              </span>
+            </div>
+
+            <div className="space-y-2">
+              {warning.map((w) => (
+                <WarningWordCard
+                  key={w}
+                  value={w}
+                  busy={busy}
+                  onDelete={async (val) => delWord("warning", val)}
+                  onMove={async (val, to) => moveWord(val, to)}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* Block */}
           <div className="p-7 bg-rose-50/30">
             <div className="flex items-center gap-2 mb-5">
               <h2 className="text-xl font-bold text-gray-800">Blocklist</h2>
@@ -194,7 +255,9 @@ export default function WordsPage() {
                 <BlockWordCard
                   key={w}
                   value={w}
+                  busy={busy}
                   onDelete={async (val) => delWord("block", val)}
+                  onMove={async (val, to) => moveWord(val, to)}
                 />
               ))}
             </div>

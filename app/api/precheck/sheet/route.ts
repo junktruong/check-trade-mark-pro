@@ -1,15 +1,6 @@
-// app/api/precheck/sheet/route.ts
-// New endpoint for "server does everything":
-// - accepts Google Sheet link
-// - server fetches CSV + runs Blocklist/Gemini-policy/TMHunt checks
-// - server downloads artwork to compute rankedColors (for color picking)
-// - returns prepared rows for the extension
-
 import { NextResponse } from "next/server";
-import crypto from "crypto";
 import { connectMongo } from "@/lib/mongo";
-import { AllowWord, BlockWord } from "@/models/Words";
-import { PrecheckCache } from "@/models/PrecheckCache";
+import { AllowWord, WarningWord, BlockWord } from "@/models/Words";
 import { callTMHunt } from "@/lib/tmhunt";
 
 export const runtime = "nodejs";
@@ -25,31 +16,19 @@ function cors(req: Request) {
     Vary: "Origin",
   };
 }
-
 export async function OPTIONS(req: Request) {
   return new NextResponse(null, { status: 204, headers: cors(req) });
 }
 
 // -------------------- utils --------------------
 function norm(s: any) {
-  return String(s ?? "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
+  return String(s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
 }
-
-function sha256(s: string) {
-  return crypto.createHash("sha256").update(s).digest("hex");
-}
-
 function uniq(arr: string[]) {
   return Array.from(new Set(arr));
 }
-
 function buildText(r: any) {
-  return [r.brand, r.title, r.bullet1, r.bullet2, r.description]
-    .filter(Boolean)
-    .join(" ");
+  return [r.brand, r.title, r.bullet1, r.bullet2, r.description].filter(Boolean).join(" ");
 }
 
 // -------------------- Google Sheet -> CSV URL --------------------
@@ -65,15 +44,12 @@ function parseGidFromUrl(u: string) {
   } catch {}
   return "";
 }
-
 function buildGoogleSheetCsvUrl(sheetLink: string) {
   const s = String(sheetLink || "").trim();
   if (!s) return "";
 
-  // Already a CSV export link
   if (/\/export\?/i.test(s) && /format=csv/i.test(s)) return s;
 
-  // Typical: https://docs.google.com/spreadsheets/d/<ID>/edit#gid=0
   const m = s.match(/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
   if (!m) return "";
 
@@ -82,8 +58,7 @@ function buildGoogleSheetCsvUrl(sheetLink: string) {
   return `https://docs.google.com/spreadsheets/d/${id}/export?format=csv&gid=${encodeURIComponent(gid)}`;
 }
 
-// -------------------- CSV parser (no dependency) --------------------
-// Handles: commas, quotes, CRLF/LF, escaped quotes "".
+// -------------------- CSV parser --------------------
 function parseCsv(text: string): string[][] {
   const out: string[][] = [];
   const s = String(text ?? "");
@@ -98,9 +73,7 @@ function parseCsv(text: string): string[][] {
     cur = "";
   };
   const pushRow = () => {
-    // trim trailing \r
     row = row.map((x) => (x.endsWith("\r") ? x.slice(0, -1) : x));
-    // ignore completely empty row
     if (row.some((x) => String(x).trim() !== "")) out.push(row);
     row = [];
   };
@@ -148,10 +121,8 @@ function parseCsv(text: string): string[][] {
     i++;
   }
 
-  // flush last
   pushCell();
   pushRow();
-
   return out;
 }
 
@@ -176,15 +147,11 @@ function toObjectsFromCsv(csvText: string): any[] {
 function extractImgSrc(value: any): string {
   const s = String(value || "").trim();
   if (!s) return "";
-
-  // plain URL
   if (/^https?:\/\/\S+$/i.test(s)) return s;
 
-  // <img src="...">
   const m = s.match(/<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/i);
   if (m && m[1]) return String(m[1]).trim();
 
-  // first URL in the text
   const m2 = s.match(/https?:\/\/[^\s"'<>]+/i);
   return m2 ? m2[0] : "";
 }
@@ -192,32 +159,23 @@ function extractImgSrc(value: any): string {
 function pickRowImageUrls(row: any) {
   const fullRaw = row?.image_url ?? row?.image ?? row?.artwork_url ?? row?.artwork ?? "";
   const thumbRaw = row?.thumbnail_url ?? row?.thumb_url ?? row?.image_thumb ?? row?.thumb ?? row?.thumbnail ?? "";
-  return {
-    fullUrl: extractImgSrc(fullRaw),
-    thumbUrl: extractImgSrc(thumbRaw),
-  };
+  return { fullUrl: extractImgSrc(fullRaw), thumbUrl: extractImgSrc(thumbRaw) };
 }
 
 function cleanRowObject(obj: any) {
   const out: any = {};
-  for (const [k, v] of Object.entries(obj || {})) {
-    out[k] = typeof v === "string" ? v.trim() : v;
-  }
+  for (const [k, v] of Object.entries(obj || {})) out[k] = typeof v === "string" ? v.trim() : v;
   return out;
 }
-
 function isTrulyEmptyRow(obj: any) {
-  const vals = Object.values(obj || {});
-  return !vals.some((v) => String(v ?? "").trim() !== "");
+  return !Object.values(obj || {}).some((v) => String(v ?? "").trim() !== "");
 }
-
 function looksLikeHeaderRow(obj: any) {
   const n = String(obj?.name ?? "").trim().toLowerCase();
   const t = String(obj?.title ?? "").trim().toLowerCase();
   const b = String(obj?.brand ?? "").trim().toLowerCase();
   return (n === "name" && t === "title") || (n === "name" && b === "brand");
 }
-
 function isUsableRow(obj: any) {
   const name = String(obj?.name ?? "").trim();
   const title = String(obj?.title ?? "").trim();
@@ -225,89 +183,38 @@ function isUsableRow(obj: any) {
   return !!(name || title || img);
 }
 
-// -------------------- TMHunt parsing (ONLY LIVE + TEXT) --------------------
+// -------------------- TMHunt parsing (LIVE + TEXT strict) --------------------
 function extractLiveTextMarks(tm: any): string[] {
   const src = tm?.liveMarks;
   if (!Array.isArray(src)) return [];
 
   const out: string[] = [];
-
   for (const x of src) {
-    // ✅ STRICT: nếu chỉ là string thì KHÔNG lấy (vì không biết status/type)
+    if (!x) continue;
+
+    // ❌ bỏ string (không có status/type)
     if (typeof x === "string") continue;
 
-    // case: array row
-    // Example: ["76491346","LEGEND","LIVE","TEXT", ...]
     if (Array.isArray(x)) {
       const word = norm(x?.[1] ?? "");
       const status = norm(x?.[2] ?? "");
-      // một số format có thể lệch index, nên fallback thêm [4]
       const type = norm(x?.[3] ?? x?.[4] ?? "");
-
-      if (!word) continue;
-      if (status !== "live") continue;  // ✅ LIVE only
-      if (type !== "text") continue;    // ✅ TEXT only
-
-      out.push(word);
+      if (word && status === "live" && type === "text") out.push(word);
       continue;
     }
 
-    // case: object
-    if (x && typeof x === "object") {
-      const word = norm(
-        x?.[1] ??
-        x?.wordmark ??
-        x?.mark ??
-        x?.trademark ??
-        x?.text ??
-        ""
-      );
-
-      const status = norm(
-        x?.status ??
-        x?.liveStatus ??
-        x?.state ??
-        x?.[2] ??
-        ""
-      );
-
-      const type = norm(
-        x?.type ??
-        x?.markType ??
-        x?.kind ??
-        x?.[3] ??
-        x?.[4] ??
-        ""
-      );
-
-      if (!word) continue;
-      if (status !== "live") continue; // ✅ LIVE only
-      if (type !== "text") continue;   // ✅ TEXT only
-
-      out.push(word);
-      continue;
+    if (typeof x === "object") {
+      const word = norm(x?.[1] ?? x?.wordmark ?? x?.mark ?? x?.trademark ?? x?.text ?? "");
+      const status = norm(x?.status ?? x?.liveStatus ?? x?.state ?? x?.[2] ?? "");
+      const type = norm(x?.type ?? x?.markType ?? x?.kind ?? x?.[3] ?? x?.[4] ?? "");
+      if (word && status === "live" && type === "text") out.push(word);
     }
   }
 
   return uniq(out).filter(Boolean);
 }
 
-// -------------------- Suggestion filtering: allowlist + TMHunt live-text --------------------
-async function filterSynonymsByAllowAndTMHunt(syns: string[], allow: string[]) {
-  const allowSet = new Set(allow.map(norm).filter(Boolean));
-  const candidates = uniq(syns.map(norm).filter(Boolean)).filter((s) => !allowSet.has(s));
-
-  if (!candidates.length) return { safe: [] as string[], live: [] as string[] };
-
-  const tm = await callTMHunt(candidates.join(" "));
-  const live = uniq(extractLiveTextMarks(tm));
-  const liveSet = new Set(live);
-
-  const safe = candidates.filter((s) => !liveSet.has(s));
-  return { safe, live };
-}
-
-// -------------------- Gemini Policy Check (with evidence) --------------------
+// -------------------- Gemini Policy Check (WARNING) --------------------
 async function geminiPolicyCheck(row: any) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("Server missing GEMINI_API_KEY");
@@ -316,36 +223,29 @@ async function geminiPolicyCheck(row: any) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
   const prompt = `You are a strict **Amazon Merch on Demand Compliance Reviewer**.
-Your task is to review the following listing text (Title, Bullets, Description) and flag ANY potential violations of Amazon's Content Policies.
+Review listing text and flag ANY potential Amazon policy violations.
 
 **INPUT DATA:**
+-Brand: ${row.brand || ""}
 -Title: ${row.title || ""}
 -Bullet 1: ${row.bullet1 || ""}
 -Bullet 2: ${row.bullet2 || ""}
 -Description: ${row.description || ""}
 
-**STRICT COMPLIANCE RULES (Based on Amazon Policy):**
-1. **ILLEGAL OR INFRINGING (High Risk):**
-   - **Trademarks/Copyrights:** Flag any potential use of famous brands (e.g., Disney, Nike), band names, song lyrics, movie quotes, TV shows, video games, or celebrities.
-   - **Note:** You are an AI, not a trademark database (USPTO), but you must flag *likely* protected terms.
-
-2. **OFFENSIVE OR CONTROVERSIAL:**
-   - **Hate/Violence:** No promotion of hatred, violence, racial/religious intolerance, or human tragedies.
-   - **Profanity:** No F-words or attacks on groups.
-   - **Drugs:** No promotion of illegal acts or drugs.
-   - **Sexual Content:** No pornography or sexually obscene content.
-   - **Youth Policy:** If the content is sexual, profane, or promotes violence, it strictly CANNOT be on Youth products (flag this if the text implies it might be sold to kids).
-
-3. **METADATA & CUSTOMER EXPERIENCE (Strictly Enforced):**
-   - **Product Quality:** DO NOT describe the shirt itself (e.g., "high quality," "cotton," "soft," "comfortable," "premium fit"). Describe only the *design*.
-   - **Shipping/Service:** DO NOT mention "fast shipping," "delivery," "returns," "money back," or "best seller."
-   - **Charity/Donations:** DO NOT claim proceeds go to charity.
-   - **Keywords:** Avoid keyword stuffing (e.g., "gift for mom dad sister brother...").
-   - **Reviews:** DO NOT ask for reviews.
-
-Return JSON ONLY.
-
-IMPORTANT: For each issue, include "evidence": an array of the exact substrings (short snippets) from the field that caused the issue. If unsure, provide your best-guess minimal snippet(s).`;
+Return JSON ONLY:
+{
+  "policy_ok": true|false,
+  "policy_issues": [
+    {
+      "field":"brand|title|bullet1|bullet2|description",
+      "type":"IP|MISLEADING|HATE|ADULT|DRUGS|VIOLENCE|OTHER",
+      "message":"...",
+      "fix_suggestion":"...",
+      "evidence":["exact short snippets"],
+      "terms":["key risky terms/phrases (normalized)"]
+    }
+  ]
+}`;
 
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -365,6 +265,7 @@ IMPORTANT: For each issue, include "evidence": an array of the exact substrings 
                 message: { type: "STRING" },
                 fix_suggestion: { type: "STRING" },
                 evidence: { type: "ARRAY", items: { type: "STRING" } },
+                terms: { type: "ARRAY", items: { type: "STRING" } },
               },
             },
           },
@@ -385,37 +286,15 @@ IMPORTANT: For each issue, include "evidence": an array of the exact substrings 
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error("Gemini returned empty response");
 
-  let obj: any;
-  try {
-    obj = JSON.parse(text);
-  } catch {
-    throw new Error("Gemini JSON parse failed: " + String(text).slice(0, 220));
-  }
-
-  // normalize evidence arrays
-  if (Array.isArray(obj?.policy_issues)) {
-    obj.policy_issues = obj.policy_issues.map((it: any) => {
-      const evidence = Array.isArray(it?.evidence) ? it.evidence.map((x: any) => String(x)).filter(Boolean).slice(0, 12) : [];
-      return {
-        field: String(it?.field || ""),
-        type: String(it?.type || ""),
-        message: String(it?.message || ""),
-        fix_suggestion: String(it?.fix_suggestion || ""),
-        evidence,
-      };
-    });
-  }
-
-  return obj;
+  return JSON.parse(text);
 }
 
 function buildHighlightsByField(issues: any[]) {
   const out: Record<string, string[]> = {};
   for (const it of issues || []) {
     const f = String(it?.field || "").toLowerCase();
-    if (!f) continue;
     const ev = Array.isArray(it?.evidence) ? it.evidence.map((x: any) => String(x)).filter(Boolean) : [];
-    if (!ev.length) continue;
+    if (!f || !ev.length) continue;
     if (!out[f]) out[f] = [];
     out[f].push(...ev);
   }
@@ -465,59 +344,44 @@ function srgbToLin(c: number) {
   c = c / 255;
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
 }
-
 function relLuminance(rgb: { r: number; g: number; b: number }) {
   const r = srgbToLin(rgb.r);
   const g = srgbToLin(rgb.g);
   const b = srgbToLin(rgb.b);
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
-
-function contrastRatio(rgb1: { r: number; g: number; b: number }, rgb2: { r: number; g: number; b: number }) {
-  const L1 = relLuminance(rgb1);
-  const L2 = relLuminance(rgb2);
+function contrastRatio(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }) {
+  const L1 = relLuminance(a);
+  const L2 = relLuminance(b);
   const hi = Math.max(L1, L2);
   const lo = Math.min(L1, L2);
   return (hi + 0.05) / (lo + 0.05);
 }
-
-function rankColors(dominantRGB: { r: number; g: number; b: number }) {
-  const entries = Object.entries(COLOR_PALETTE).map(([slug, rgb]) => {
-    const cr = contrastRatio(dominantRGB, rgb);
-    const L = relLuminance(rgb);
-    return { slug, cr, L };
-  });
-  entries.sort((a, b) => b.cr - a.cr);
-  return entries.map((e) => ({
-    slug: e.slug,
-    cr: Number(e.cr.toFixed(4)),
-    L: Number(e.L.toFixed(4)),
+function rankColors(d: { r: number; g: number; b: number }) {
+  const entries = Object.entries(COLOR_PALETTE).map(([slug, rgb]) => ({
+    slug,
+    cr: contrastRatio(d, rgb),
+    L: relLuminance(rgb),
   }));
+  entries.sort((x, y) => y.cr - x.cr);
+  return entries.map((e) => ({ slug: e.slug, cr: Number(e.cr.toFixed(4)), L: Number(e.L.toFixed(4)) }));
 }
 
 async function computeRankedColorsFromImageUrl(imageUrl: string) {
   if (!imageUrl) return [];
-
-  // dynamic import to avoid hard crash if sharp isn't installed.
   let sharpMod: any = null;
   try {
     sharpMod = (await import("sharp")).default;
   } catch {
-    // If sharp isn't available, just return empty -> extension will skip auto color.
     return [];
   }
 
-  const res = await fetch(imageUrl, {
-    cache: "no-store",
-    redirect: "follow",
-    headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
-  });
+  const res = await fetch(imageUrl, { cache: "no-store", redirect: "follow" });
   if (!res.ok) return [];
 
   const buf = Buffer.from(await res.arrayBuffer());
-
-  // Downscale to speed.
   const targetW = 64;
+
   const { data, info } = await sharpMod(buf)
     .ensureAlpha()
     .resize({ width: targetW, withoutEnlargement: true })
@@ -525,22 +389,15 @@ async function computeRankedColorsFromImageUrl(imageUrl: string) {
     .toBuffer({ resolveWithObject: true });
 
   const channels = info?.channels || 4;
-  let r = 0,
-    g = 0,
-    b = 0,
-    n = 0;
+  let r = 0, g = 0, b = 0, n = 0;
 
   for (let i = 0; i < data.length; i += channels) {
     const rr = data[i];
     const gg = data[i + 1];
     const bb = data[i + 2];
     const aa = channels >= 4 ? data[i + 3] : 255;
-
     if (aa < 16) continue;
-    r += rr;
-    g += gg;
-    b += bb;
-    n++;
+    r += rr; g += gg; b += bb; n++;
   }
 
   const dominant = n ? { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n) } : { r: 255, g: 255, b: 255 };
@@ -550,16 +407,12 @@ async function computeRankedColorsFromImageUrl(imageUrl: string) {
 // -------------------- Main handler --------------------
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-
+    const body = await req.json().catch(() => ({}));
     const sheetUrl = String(body?.sheetUrl || "").trim();
     const options = body?.options || {};
     const enableText = !!options.enableTextCheck;
     const enablePolicy = !!options.enablePolicyCheck;
     const enableTm = !!options.enableTmCheck;
-
-    const ttlDays = Math.max(1, Math.min(365, Number(body?.cacheTtlDays || 7)));
-    const ttlMs = ttlDays * 24 * 60 * 60 * 1000;
 
     if (!sheetUrl) {
       return NextResponse.json({ ok: false, error: "sheetUrl is empty" }, { status: 400, headers: cors(req) });
@@ -567,24 +420,16 @@ export async function POST(req: Request) {
 
     const csvUrl = buildGoogleSheetCsvUrl(sheetUrl);
     if (!csvUrl) {
-      return NextResponse.json({ ok: false, error: "Invalid Google Sheet link (cannot build CSV export URL)" }, { status: 400, headers: cors(req) });
+      return NextResponse.json({ ok: false, error: "Invalid Google Sheet link" }, { status: 400, headers: cors(req) });
     }
 
-    // fetch CSV
-    const csvRes = await fetch(csvUrl, {
-      method: "GET",
-      cache: "no-store",
-      redirect: "follow",
-      headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
-    });
-
+    const csvRes = await fetch(csvUrl, { method: "GET", cache: "no-store", redirect: "follow" });
     if (!csvRes.ok) {
       return NextResponse.json({ ok: false, error: `Fetch CSV failed: HTTP ${csvRes.status}` }, { status: 502, headers: cors(req) });
     }
 
     const csvText = await csvRes.text();
 
-    // parse rows
     const rawRows = toObjectsFromCsv(csvText)
       .map(cleanRowObject)
       .filter((r) => !isTrulyEmptyRow(r))
@@ -595,7 +440,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Google Sheet has no usable rows" }, { status: 400, headers: cors(req) });
     }
 
-    // normalize to expected shape
+    // normalize
     const rows = rawRows.map((r, i) => {
       const name = String(r?.name || `Row ${i + 1}`);
       const { fullUrl, thumbUrl } = pickRowImageUrls(r);
@@ -614,194 +459,224 @@ export async function POST(req: Request) {
 
     await connectMongo();
 
-    // load allow/block once for whole batch
-    const allow = (await AllowWord.find({}).lean()).map((x: any) => norm(x.value)).filter(Boolean);
+    const allowDocs = await AllowWord.find({}).lean();
+    const warnDocs = await WarningWord.find({}).lean();
+    const blockDocs = await BlockWord.find({}).lean();
 
-    const denyDocs = await BlockWord.find({}).lean();
-    const deny = denyDocs.map((x: any) => norm(x.value)).filter(Boolean);
+    const allow = allowDocs.map((x: any) => norm(x.value)).filter(Boolean);
+    const allowSet = new Set(allow);
 
-    // map value -> synonyms
-    const denyMap = new Map<string, string[]>();
-    for (const d of denyDocs) {
-      const key = norm((d as any)?.value);
-      if (!key) continue;
-      const syns = Array.isArray((d as any)?.synonyms) ? (d as any).synonyms.map(norm).filter(Boolean) : [];
-      denyMap.set(key, syns);
+    const warn = warnDocs.map((x: any) => norm(x.value)).filter(Boolean);
+    const block = blockDocs.map((x: any) => norm(x.value)).filter(Boolean);
+
+    const warnMap = new Map<string, string[]>();
+    for (const d of warnDocs as any[]) warnMap.set(norm(d.value), (d.synonyms || []).map(norm).filter(Boolean));
+
+    const blockMap = new Map<string, string[]>();
+    for (const d of blockDocs as any[]) blockMap.set(norm(d.value), (d.synonyms || []).map(norm).filter(Boolean));
+
+    async function filterSynonymsByAllowAndTMHunt(syns: string[]) {
+      const candidates = uniq(syns.map(norm).filter(Boolean)).filter((s) => !allowSet.has(s));
+      if (!candidates.length) return { safe: [] as string[], live: [] as string[] };
+
+      const tm = await callTMHunt(candidates.join(" "));
+      const live = uniq(extractLiveTextMarks(tm));
+      const liveSet = new Set(live);
+
+      return { safe: candidates.filter((s) => !liveSet.has(s)), live };
     }
 
-    const flagsKey = `${enableText ? 1 : 0}${enablePolicy ? 1 : 0}${enableTm ? 1 : 0}`;
+    async function buildSuggestionsByWord(hits: string[], synMap: Map<string, string[]>) {
+      const suggestionsByWord: Record<string, string[]> = {};
+      const allSyns = uniq(hits.flatMap((w) => synMap.get(w) || []).map(norm).filter(Boolean));
 
-    const outRows: any[] = [];
+      if (!allSyns.length) {
+        for (const w of hits) suggestionsByWord[w] = [];
+        return suggestionsByWord;
+      }
+
+      const { safe } = await filterSynonymsByAllowAndTMHunt(allSyns);
+      const safeSet = new Set(safe);
+
+      for (const w of hits) {
+        const syns = uniq((synMap.get(w) || []).map(norm).filter(Boolean));
+        suggestionsByWord[w] = syns.filter((s) => safeSet.has(s)).slice(0, 12);
+      }
+      return suggestionsByWord;
+    }
+
+    const now = new Date();
+
+    const results: any[] = [];
+    const rowsReady: any[] = [];
+
+    const tmhuntToBlock = new Set<string>();
+    const geminiToWarn = new Set<string>();
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
       const name = r?.name || `Row ${i + 1}`;
-
       const normalizedText = norm(buildText(r));
-      const hash = sha256(flagsKey + "|" + normalizedText);
 
-      // ===== cache hit server-side =====
-      const cached = await PrecheckCache.findOne({ hash }).lean();
-      if (cached && Date.now() - new Date((cached as any).ts).getTime() <= ttlMs) {
-        if (!(cached as any).ok) {
-          return NextResponse.json(
-            { ok: false, step: (cached as any).step, row: { index: i, name }, details: (cached as any).details, cache: "HIT" },
-            { headers: cors(req) }
-          );
-        }
-        // PASS cached -> still need rankedColors for fill; compute fresh (or you can cache separately if you want)
-      }
+      let status: "PASS" | "WARN" | "BLOCK" = "PASS";
+      const issues: any = {};
 
-      // ===== Step 1: blocklist =====
+      // 1) Block words (hard stop)
       if (enableText) {
-        const hits = uniq(deny.filter((w) => w && normalizedText.includes(w)));
+        const blockHits = uniq(block.filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
+        if (blockHits.length) {
+          status = "BLOCK";
+          issues.block = {
+            words: blockHits,
+            suggestionsByWord: await buildSuggestionsByWord(blockHits, blockMap),
+            message: "Replace blocked words using suggested safe alternatives.",
+          };
 
-        if (hits.length) {
-          const now = new Date();
-
-          // optional: track stats for admin
           await BlockWord.updateMany(
-            { value: { $in: hits } },
+            { value: { $in: blockHits } },
             { $set: { lastSeenAt: now }, $inc: { hitCount: 1 } }
           );
+        }
 
-          // build suggestionsByWord from stored synonyms, then filter by allow + TMHunt
-          const suggestionsByWord: Record<string, string[]> = {};
-          const allSyns = uniq(hits.flatMap((w) => (denyMap.get(w) || []).map(norm)).filter(Boolean));
-
-          if (allSyns.length) {
-            const { safe } = await filterSynonymsByAllowAndTMHunt(allSyns, allow);
-            const safeSet = new Set(safe);
-
-            for (const w of hits) {
-              const syns = uniq((denyMap.get(w) || []).map(norm).filter(Boolean));
-              suggestionsByWord[w] = syns.filter((s) => safeSet.has(s)).slice(0, 12);
-            }
-          } else {
-            for (const w of hits) suggestionsByWord[w] = [];
-          }
-
-          const fail = {
-            ok: false,
-            step: "BLOCKLIST",
-            row: { index: i, name },
-            details: {
-              blockedWords: hits,
-              suggestionsByWord,
-              message: "Replace blocked words using suggested safe alternatives.",
-            },
-            cache: "MISS",
+        // 2) Warning words (soft stop)
+        const warnHits = uniq(warn.filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
+        if (warnHits.length) {
+          if (status !== "BLOCK") status = "WARN";
+          issues.warningWords = {
+            words: warnHits,
+            suggestionsByWord: await buildSuggestionsByWord(warnHits, warnMap),
+            message: "Warning words found. Review and Continue if acceptable.",
           };
 
-          await PrecheckCache.updateOne(
-            { hash },
-            { $set: { ok: false, step: "BLOCKLIST", details: fail.details, ts: now } },
-            { upsert: true }
+          await WarningWord.updateMany(
+            { value: { $in: warnHits } },
+            { $set: { lastSeenAt: now }, $inc: { hitCount: 1 } }
           );
-
-          return NextResponse.json(fail, { headers: cors(req) });
         }
       }
 
-      // ===== Step 2: Gemini policy =====
+      // 3) Gemini policy => ALWAYS WARNING
       if (enablePolicy) {
-        const pr = await geminiPolicyCheck(r);
-        const ok = !!pr?.policy_ok;
+        try {
+          const pr = await geminiPolicyCheck(r);
+          const policyOk = !!pr?.policy_ok;
+          if (!policyOk) {
+            if (status !== "BLOCK") status = "WARN";
 
-        if (!ok) {
-          const issues = Array.isArray(pr?.policy_issues) ? pr.policy_issues : [];
-          const fail = {
-            ok: false,
-            step: "GEMINI_POLICY",
-            row: { index: i, name },
-            details: { issues, highlightsByField: buildHighlightsByField(issues) },
-            cache: "MISS",
+            const policyIssues = Array.isArray(pr?.policy_issues) ? pr.policy_issues : [];
+            issues.geminiPolicy = {
+              issues: policyIssues,
+              highlightsByField: buildHighlightsByField(policyIssues),
+              message: "Gemini flagged policy risks (WARNING). Review and Continue if acceptable.",
+            };
+
+            // ✅ auto-save to WarningWord (terms preferred, fallback evidence)
+            for (const it of policyIssues) {
+              const terms = Array.isArray(it?.terms) ? it.terms : [];
+              const ev = Array.isArray(it?.evidence) ? it.evidence : [];
+              const arr = (terms.length ? terms : ev).map((x: any) => norm(String(x))).filter(Boolean);
+              for (const t of arr) {
+                if (t && t.length <= 160 && !allowSet.has(t)) geminiToWarn.add(t);
+              }
+            }
+          }
+        } catch (e: any) {
+          if (status !== "BLOCK") status = "WARN";
+          issues.geminiPolicy = {
+            issues: [],
+            message: "Gemini policy check failed (treated as WARNING): " + (e?.message || String(e)),
           };
-
-          await PrecheckCache.updateOne(
-            { hash },
-            { $set: { ok: false, step: "GEMINI_POLICY", details: fail.details, ts: new Date() } },
-            { upsert: true }
-          );
-
-          return NextResponse.json(fail, { headers: cors(req) });
         }
       }
 
-      // ===== Step 3: TMHunt (LIVE + TEXT), allow filter + save blocked =====
+      // 4) TMHunt => BLOCK + auto-save BlockWord
       if (enableTm) {
-        const tm = await callTMHunt(normalizedText);
+        try {
+          const tm = await callTMHunt(normalizedText);
+          const liveTextMarks = uniq(extractLiveTextMarks(tm));
+          const filtered = liveTextMarks.filter((m) => !allowSet.has(m));
 
-        const liveTextMarks = uniq(extractLiveTextMarks(tm));
-        const allowSet = new Set(allow);
-        const filtered = liveTextMarks.filter((m) => !allowSet.has(m));
-
-        if (filtered.length) {
-          // store into DB (source tmhunt)
-          const now = new Date();
-          await BlockWord.bulkWrite(
-            filtered.map((w) => ({
-              updateOne: {
-                filter: { value: w },
-                update: {
-                  $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [] },
-                  $set: { lastSeenAt: now },
-                  $inc: { hitCount: 1 },
-                },
-                upsert: true,
-              },
-            })),
-            { ordered: false }
-          );
-
-          const fail = {
-            ok: false,
-            step: "TMHUNT",
-            row: { index: i, name },
-            details: {
+          if (filtered.length) {
+            status = "BLOCK";
+            issues.tmhunt = {
               liveMarks: filtered,
-              message: "These terms appear LIVE (TEXT). Replace/remove, or add to allowlist if intended.",
-            },
-            cache: "MISS",
-          };
-
-          await PrecheckCache.updateOne(
-            { hash },
-            { $set: { ok: false, step: "TMHUNT", details: fail.details, ts: now } },
-            { upsert: true }
-          );
-
-          return NextResponse.json(fail, { headers: cors(req) });
+              message: "TMHunt found LIVE TEXT marks. Must replace/remove.",
+            };
+            filtered.forEach((w) => tmhuntToBlock.add(w));
+          }
+        } catch (e: any) {
+          // TMHunt lỗi thì không tự block, chỉ note
+          issues.tmhuntError = { message: "TMHunt error: " + (e?.message || String(e)) };
         }
       }
 
-      // ===== PASS => cache ok =====
-      await PrecheckCache.updateOne(
-        { hash },
-        { $set: { ok: true, step: "PASS", details: null, ts: new Date() } },
-        { upsert: true }
-      );
+      results.push({ index: i, name, status, issues });
 
-      // ===== server computes rankedColors for extension =====
-      let rankedColors: any[] = [];
-      try {
-        rankedColors = await computeRankedColorsFromImageUrl(String(r.image_url || "").trim());
-      } catch {
-        rankedColors = [];
+      // only prepare rowsReady if NOT BLOCK
+      if (status !== "BLOCK") {
+        let rankedColors: any[] = [];
+        try {
+          rankedColors = await computeRankedColorsFromImageUrl(String(r.image_url || "").trim());
+        } catch {
+          rankedColors = [];
+        }
+        rowsReady.push({ ...r, rankedColors });
       }
-
-      outRows.push({
-        ...r,
-        rankedColors,
-      });
     }
+
+    // ✅ bulk save TMHunt -> BlockWord
+    if (tmhuntToBlock.size) {
+      const arr = [...tmhuntToBlock];
+      await BlockWord.bulkWrite(
+        arr.map((w) => ({
+          updateOne: {
+            filter: { value: w },
+            update: {
+              $setOnInsert: { value: w, source: "tmhunt", synonyms: [] },
+              $set: { lastSeenAt: now },
+              $inc: { hitCount: 1 },
+            },
+            upsert: true,
+          },
+        })),
+        { ordered: false }
+      );
+    }
+
+    // ✅ bulk save Gemini -> WarningWord
+    if (geminiToWarn.size) {
+      const arr = [...geminiToWarn];
+      await WarningWord.bulkWrite(
+        arr.map((w) => ({
+          updateOne: {
+            filter: { value: w },
+            update: {
+              $setOnInsert: { value: w, source: "gemini_policy", synonyms: [] },
+              $set: { lastSeenAt: now },
+              $inc: { hitCount: 1 },
+            },
+            upsert: true,
+          },
+        })),
+        { ordered: false }
+      );
+    }
+
+    const summary = {
+      total: results.length,
+      pass: results.filter((x) => x.status === "PASS").length,
+      warn: results.filter((x) => x.status === "WARN").length,
+      block: results.filter((x) => x.status === "BLOCK").length,
+    };
 
     return NextResponse.json(
       {
-        ok: true,
-        step: "READY",
-        rows: outRows,
-        meta: { rows: outRows.length, source: "google_sheet" },
+        ok: summary.block === 0 && summary.warn === 0,
+        step: "REPORT",
+        summary,
+        canContinue: summary.block === 0 && summary.warn > 0,
+        results,    // ✅ tất cả lỗi của tất cả hàng
+        rowsReady,  // ✅ PASS + WARN để extension fill/publish
       },
       { headers: cors(req) }
     );
