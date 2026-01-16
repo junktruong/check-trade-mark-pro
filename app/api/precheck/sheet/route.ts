@@ -404,6 +404,10 @@ export async function POST(req: Request) {
       warn: results.filter((x) => x.status === "WARN").length,
       block: results.filter((x) => x.status === "BLOCK").length,
     };
+    console.log({
+       
+        "issue" : results[0].issues
+              })
 
     return NextResponse.json(
       {
