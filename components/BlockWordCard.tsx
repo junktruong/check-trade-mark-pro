@@ -21,6 +21,17 @@ function norm(s: string) {
   return s.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+// ✅ Change this if your allowlist API path differs
+const ALLOW_API_URL = "/api/words/allow";
+
+async function safeJson(res: Response) {
+  try {
+    return await res.json();
+  } catch {
+    return {};
+  }
+}
+
 export default function BlockWordCard({
   value,
   onDelete,
@@ -35,6 +46,7 @@ export default function BlockWordCard({
   const [newSyn, setNewSyn] = useState("");
   const [synBusy, setSynBusy] = useState(false);
 
+  const [moveBusy, setMoveBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const v = useMemo(() => norm(value), [value]);
@@ -43,7 +55,7 @@ export default function BlockWordCard({
     setLoading(true);
     try {
       const res = await fetch(`/api/words/block?value=${encodeURIComponent(v)}`);
-      const data = await res.json();
+      const data = await safeJson(res);
       if (data?.ok) setMeta(data.word);
     } finally {
       setLoading(false);
@@ -67,7 +79,7 @@ export default function BlockWordCard({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ value: v, add }),
       });
-      const data = await res.json();
+      const data = await safeJson(res);
 
       if (!data?.ok) {
         setNotice(data?.error || "Add synonym failed.");
@@ -81,9 +93,10 @@ export default function BlockWordCard({
 
       if (rejected.length) {
         const lines = rejected.map((r: any) => {
-          const marks = Array.isArray(r?.liveMarks) && r.liveMarks.length
-            ? ` (LIVE: ${r.liveMarks.slice(0, 6).join(", ")}${r.liveMarks.length > 6 ? "…" : ""})`
-            : "";
+          const marks =
+            Array.isArray(r?.liveMarks) && r.liveMarks.length
+              ? ` (LIVE: ${r.liveMarks.slice(0, 6).join(", ")}${r.liveMarks.length > 6 ? "…" : ""})`
+              : "";
           return `• ${r.value}${marks}`;
         });
         setNotice(
@@ -107,10 +120,51 @@ export default function BlockWordCard({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ value: v, remove: [s] }),
       });
-      const data = await res.json();
+      const data = await safeJson(res);
       if (data?.ok) setMeta(data.word);
     } finally {
       setSynBusy(false);
+    }
+  }
+
+  // ✅ NEW: move this blocked word to SAFE (allowlist), then delete from blocklist
+  async function moveToSafe() {
+    if (!v) return;
+
+    setNotice(null);
+    setMoveBusy(true);
+    try {
+      // 1) add to allowlist
+      const res = await fetch(ALLOW_API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: v }),
+      });
+      const data = await safeJson(res);
+
+      if (!res.ok || !data?.ok) {
+        const msg = data?.error || data?.message || `Move to SAFE failed (HTTP ${res.status})`;
+        setNotice(msg);
+        return;
+      }
+
+      // 2) remove from blocklist (use existing callback)
+      try {
+        await Promise.resolve(onDelete(value));
+      } catch (e: any) {
+        // allowlist already done, but delete failed
+        setNotice(
+          `✅ Added to SAFE: "${value}".\n⚠️ Nhưng xoá khỏi BLOCK thất bại: ${e?.message || String(e)}`
+        );
+        return;
+      }
+
+      setNotice(`✅ Moved to SAFE: "${value}"`);
+      setTimeout(() => setNotice(null), 1200);
+    } catch (e: any) {
+      setNotice(e?.message || String(e));
+    } finally {
+      setMoveBusy(false);
     }
   }
 
@@ -138,6 +192,20 @@ export default function BlockWordCard({
           </div>
         </button>
 
+        {/* ✅ NEW: Move to SAFE */}
+        <button
+          onClick={moveToSafe}
+          disabled={moveBusy}
+          className={`p-2 rounded-lg transition-colors ${
+            moveBusy
+              ? "text-gray-300 bg-gray-50 cursor-not-allowed"
+              : "text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50"
+          }`}
+          title="Chuyển sang SAFE (allowlist) và xoá khỏi BLOCK"
+        >
+          🛡️
+        </button>
+
         <button
           onClick={() => onDelete(value)}
           className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
@@ -160,6 +228,24 @@ export default function BlockWordCard({
                   </pre>
                 )}
 
+                <div className="flex items-center justify-between gap-2 mb-3">
+                  <div className="text-[12px] text-gray-500">
+                    Bạn có thể chuyển word này sang SAFE để bypass blocklist (nếu bạn chắc chắn dùng hợp lệ).
+                  </div>
+                  <button
+                    onClick={moveToSafe}
+                    disabled={moveBusy}
+                    className={`px-3 py-2 rounded-lg font-semibold transition-all ${
+                      moveBusy
+                        ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+                        : "bg-emerald-600 text-white hover:bg-emerald-700"
+                    }`}
+                    title="Chuyển sang SAFE (allowlist) + xoá khỏi BLOCK"
+                  >
+                    {moveBusy ? "Moving..." : "Move to SAFE"}
+                  </button>
+                </div>
+
                 <div className="flex flex-wrap gap-2">
                   {synonyms.length ? (
                     synonyms.map((s) => (
@@ -171,7 +257,7 @@ export default function BlockWordCard({
                         <button
                           className="ml-1 text-rose-500 hover:text-rose-700"
                           onClick={() => removeSynonym(s)}
-                          disabled={synBusy}
+                          disabled={synBusy || moveBusy}
                           title="Xoá synonym"
                         >
                           ✕
@@ -195,16 +281,16 @@ export default function BlockWordCard({
                     }}
                     placeholder="Thêm synonym (Enter)…"
                     className="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-rose-300"
-                    disabled={synBusy}
+                    disabled={synBusy || moveBusy}
                   />
                   <button
                     onClick={() => {
                       addSynonyms([newSyn]);
                       setNewSyn("");
                     }}
-                    disabled={!newSyn.trim() || synBusy}
+                    disabled={!newSyn.trim() || synBusy || moveBusy}
                     className={`px-4 py-2 rounded-lg font-semibold text-white transition-all ${
-                      newSyn.trim() && !synBusy
+                      newSyn.trim() && !synBusy && !moveBusy
                         ? "bg-rose-600 hover:bg-rose-700"
                         : "bg-gray-300 cursor-not-allowed"
                     }`}

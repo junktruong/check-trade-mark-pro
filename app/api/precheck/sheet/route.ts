@@ -225,7 +225,7 @@ function isUsableRow(obj: any) {
   return !!(name || title || img);
 }
 
-// -------------------- TMHunt parsing (LIVE + TEXT) --------------------
+// -------------------- TMHunt parsing (ONLY LIVE + TEXT) --------------------
 function extractLiveTextMarks(tm: any): string[] {
   const src = tm?.liveMarks;
   if (!Array.isArray(src)) return [];
@@ -233,38 +233,60 @@ function extractLiveTextMarks(tm: any): string[] {
   const out: string[] = [];
 
   for (const x of src) {
-    // case 1: string (no status/type info) -> keep (assume live)
-    if (typeof x === "string") {
-      const w = norm(x);
-      if (w) out.push(w);
-      continue;
-    }
+    // ✅ STRICT: nếu chỉ là string thì KHÔNG lấy (vì không biết status/type)
+    if (typeof x === "string") continue;
 
-    // case 2: array row (common)
+    // case: array row
     // Example: ["76491346","LEGEND","LIVE","TEXT", ...]
     if (Array.isArray(x)) {
       const word = norm(x?.[1] ?? "");
       const status = norm(x?.[2] ?? "");
-      const type = norm(x?.[3] ?? "");
+      // một số format có thể lệch index, nên fallback thêm [4]
+      const type = norm(x?.[3] ?? x?.[4] ?? "");
 
       if (!word) continue;
-      if (status && status !== "LIVE") continue;
-      if (type && type !== "Text") continue;
+      if (status !== "live") continue;  // ✅ LIVE only
+      if (type !== "text") continue;    // ✅ TEXT only
 
       out.push(word);
       continue;
     }
 
-    // case 3: object
-    const word = norm(x?.wordmark ?? x?.mark ?? x?.trademark ?? x?.text ?? x?.[1] ?? "");
-    const status = norm(x?.status ?? x?.liveStatus ?? x?.state ?? "");
-    const type = norm(x?.type ?? x?.markType ?? x?.kind ?? "");
+    // case: object
+    if (x && typeof x === "object") {
+      const word = norm(
+        x?.[1] ??
+        x?.wordmark ??
+        x?.mark ??
+        x?.trademark ??
+        x?.text ??
+        ""
+      );
 
-    if (!word) continue;
-    if (status && status !== "LIVE") continue;
-    if (type && type !== "Text") continue;
+      const status = norm(
+        x?.status ??
+        x?.liveStatus ??
+        x?.state ??
+        x?.[2] ??
+        ""
+      );
 
-    out.push(word);
+      const type = norm(
+        x?.type ??
+        x?.markType ??
+        x?.kind ??
+        x?.[3] ??
+        x?.[4] ??
+        ""
+      );
+
+      if (!word) continue;
+      if (status !== "live") continue; // ✅ LIVE only
+      if (type !== "text") continue;   // ✅ TEXT only
+
+      out.push(word);
+      continue;
+    }
   }
 
   return uniq(out).filter(Boolean);
