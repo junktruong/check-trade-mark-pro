@@ -206,16 +206,14 @@ export async function POST(req: Request) {
         status = cached.status === "WARN" ? "WARN" : "PASS";
         if (cached.issues) Object.assign(issues, cached.issues);
         results.push({ index: i, name, status, issues, cache: "HIT", continued: !!cached.continued });
-        if (status !== "BLOCK") {
-          rowsReady.push({
-            ...r,
-            rankedColors: [],
-            status,
-            issues,
-            cache: "HIT",
-            continued: !!cached.continued,
-          });
-        }
+        rowsReady.push({
+          ...r,
+          rankedColors: [],
+          status,
+          issues,
+          cache: "HIT",
+          continued: !!cached.continued,
+        });
         continue;
       }
 
