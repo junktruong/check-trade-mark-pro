@@ -43,6 +43,10 @@ function shouldRunStage(
   return lastStatusByStage?.[stage] !== "PASS";
 }
 
+function logStageResult(stage: StageName, status: StageStatus | "ERROR", row: { index: number; name: string }) {
+  console.log("[precheck/sheet] stage result", { stage, status, row });
+}
+
 // -------------------- CORS --------------------
 function cors(req: Request) {
   const origin = req.headers.get("origin") || "*";
@@ -254,6 +258,7 @@ export async function POST(req: Request) {
             } else {
               nextStatusByStage[STAGES.youthImage] = "PASS";
             }
+            logStageResult(STAGES.youthImage, nextStatusByStage[STAGES.youthImage], { index: i, name });
           } catch (e: any) {
             status = "WARN";
             nextStatusByStage[STAGES.youthImage] = "WARN";
@@ -261,6 +266,7 @@ export async function POST(req: Request) {
               issues: [],
               message: "Youth image check failed (treated as WARNING): " + (e?.message || String(e)),
             };
+            logStageResult(STAGES.youthImage, "ERROR", { index: i, name });
           }
         }
       } else if (!requiresYouthCheck) {
@@ -287,6 +293,7 @@ export async function POST(req: Request) {
           } else {
             nextStatusByStage[STAGES.blockWords] = "PASS";
           }
+          logStageResult(STAGES.blockWords, nextStatusByStage[STAGES.blockWords], { index: i, name });
         }
 
         // 2) Warning words (soft stop) => gate TMHunt
@@ -309,6 +316,7 @@ export async function POST(req: Request) {
           } else {
             nextStatusByStage[STAGES.warningWords] = "PASS";
           }
+          logStageResult(STAGES.warningWords, nextStatusByStage[STAGES.warningWords], { index: i, name });
         }
       } else {
         nextStatusByStage[STAGES.blockWords] = "PASS";
@@ -362,11 +370,13 @@ export async function POST(req: Request) {
             } else {
               nextStatusByStage[STAGES.tmhunt] = "PASS";
             }
+            logStageResult(STAGES.tmhunt, nextStatusByStage[STAGES.tmhunt], { index: i, name });
           } catch (e: any) {
             console.log(" TMHunt error:", e.message || e);
 
             // TMHunt lỗi thì không tự block, chỉ note
             issues.tmhuntError = { message: "TMHunt error: " + (e?.message || String(e)) };
+            logStageResult(STAGES.tmhunt, "ERROR", { index: i, name });
           }
         }
       } else if (!enableTm) {
@@ -404,6 +414,7 @@ export async function POST(req: Request) {
             } else {
               nextStatusByStage[STAGES.geminiPolicy] = "PASS";
             }
+            logStageResult(STAGES.geminiPolicy, nextStatusByStage[STAGES.geminiPolicy], { index: i, name });
           } catch (e: any) {
             status = "WARN";
             nextStatusByStage[STAGES.geminiPolicy] = "WARN";
@@ -411,6 +422,7 @@ export async function POST(req: Request) {
               issues: [],
               message: "Gemini policy check failed (treated as WARNING): " + (e?.message || String(e)),
             };
+            logStageResult(STAGES.geminiPolicy, "ERROR", { index: i, name });
           }
         }
       } else if (!enablePolicy) {
