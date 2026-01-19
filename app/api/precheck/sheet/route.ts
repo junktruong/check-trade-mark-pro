@@ -195,7 +195,7 @@ export async function POST(req: Request) {
 
       let status: "PASS" | "WARN" | "BLOCK" = "PASS";
       const issues: any = {};
-      let warningGate = false;
+      let warningWordGate = false;
       const rowHash = buildRowHash({ row: r, fitType, enableText, enablePolicy, enableTm });
       const cached = cachedByName.get(String(name).trim());
 
@@ -255,11 +255,11 @@ export async function POST(req: Request) {
           );
         }
 
-        // 2) Warning words (soft stop)
+        // 2) Warning words (soft stop) => gate TMHunt
         const warnHits = uniq(warn.filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
         if (warnHits.length) {
           if (status !== "BLOCK") status = "WARN";
-          warningGate = true;
+          warningWordGate = true;
           issues.warningWords = {
             words: warnHits,
             suggestionsByWord: await buildSuggestionsByWord(warnHits, warnMap, allowSet),
@@ -273,8 +273,8 @@ export async function POST(req: Request) {
         }
       }
 
-      // 2) TMHunt => BLOCK
-      if (enableTm && status !== "BLOCK" && !warningGate) {
+      // 2) TMHunt => BLOCK (skip when warning-word gate is active)
+      if (enableTm && status !== "BLOCK" && !warningWordGate) {
         try {
           const tm = await callTMHunt(normalizedText);
           const liveTextMarks = uniq(extractLiveTextMarks(tm));
@@ -294,7 +294,7 @@ export async function POST(req: Request) {
         }
       }
 
-      // 3) Gemini policy => ALWAYS WARNING
+      // 3) Gemini policy => ALWAYS WARNING (independent of warning-word gate)
       if (enablePolicy && status !== "BLOCK") {
         try {
           const pr = await geminiPolicyCheck(r);
