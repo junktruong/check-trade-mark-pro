@@ -176,8 +176,9 @@ export async function POST(req: Request) {
 
     // normalize
     const rows = normalizeRows(rawRows);
-    const { allowSet, warn, block, warnMap, blockMap } = await loadWordData();
-    const blockSet = new Set(block);
+    const { allowSet, warn, block: initialBlock, warnMap, blockMap } = await loadWordData();
+    let block = initialBlock;
+    const warnSet = new Set(warn);
 
     const now = new Date();
 
@@ -240,7 +241,7 @@ export async function POST(req: Request) {
 
       // 1) Block words (hard stop)
       if (enableText) {
-        const blockHits = uniq([...blockSet].filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
+        const blockHits = uniq(block.filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
         if (blockHits.length) {
           status = "BLOCK";
           issues.block = {
@@ -278,7 +279,7 @@ export async function POST(req: Request) {
         try {
           const tm = await callTMHunt(normalizedText);
           const liveTextMarks = uniq(extractLiveTextMarks(tm));
-          const filtered = liveTextMarks.filter((m) => !allowSet.has(m));
+          const filtered = liveTextMarks.filter((m) => !allowSet.has(m) && !warnSet.has(m));
 
           if (filtered.length) {
             status = "BLOCK";
@@ -286,15 +287,19 @@ export async function POST(req: Request) {
               liveMarks: filtered,
               message: "TMHunt found LIVE TEXT marks. Must replace/remove.",
             };
-            filtered.forEach((w) => blockSet.add(w));
-
             await Word.bulkWrite(
               filtered.map((w) => ({
                 updateOne: {
                   filter: { value: w },
                   update: {
                     $set: { kind: "BlockWord", lastSeenAt: now },
-                    $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [] },
+                    $setOnInsert: {
+                      kind: "BlockWord",
+                      value: w,
+                      source: "tmhunt",
+                      createdAt: now,
+                      synonyms: [],
+                    },
                     $inc: { hitCount: 1 },
                   },
                   upsert: true,
@@ -302,6 +307,8 @@ export async function POST(req: Request) {
               })),
               { ordered: false }
             );
+
+            block = (await BlockWord.find({}).lean()).map((x: any) => norm(x.value)).filter(Boolean);
           }
         } catch (e: any) {
           // TMHunt lỗi thì không tự block, chỉ note
