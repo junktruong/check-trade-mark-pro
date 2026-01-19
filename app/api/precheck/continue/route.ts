@@ -1,7 +1,7 @@
-import crypto from "crypto";
 import { NextResponse } from "next/server";
 import { connectMongo } from "@/lib/mongo";
 import { PrecheckRow } from "@/models/PrecheckRow";
+import { buildRowHash } from "../sheet/rows";
 
 export const runtime = "nodejs";
 
@@ -20,35 +20,10 @@ export async function OPTIONS(req: Request) {
   return new NextResponse(null, { status: 204, headers: cors(req) });
 }
 
-function sha256(s: string) {
-  return crypto.createHash("sha256").update(s).digest("hex");
-}
+const CONTINUABLE_STAGES = new Set(["warningWords", "geminiPolicy", "youthImage"]);
 
-function buildRowHash(params: {
-  row: any;
-  fitType: string;
-  enableText: boolean;
-  enablePolicy: boolean;
-  enableTm: boolean;
-}) {
-  const payload = {
-    name: String(params.row?.name || ""),
-    brand: String(params.row?.brand || ""),
-    title: String(params.row?.title || ""),
-    bullet1: String(params.row?.bullet1 || ""),
-    bullet2: String(params.row?.bullet2 || ""),
-    description: String(params.row?.description || ""),
-    price: String(params.row?.price || ""),
-    image_url: String(params.row?.image_url || ""),
-    thumbnail_url: String(params.row?.thumbnail_url || ""),
-    fitType: String(params.fitType || "none"),
-    flags: {
-      enableText: !!params.enableText,
-      enablePolicy: !!params.enablePolicy,
-      enableTm: !!params.enableTm,
-    },
-  };
-  return sha256(JSON.stringify(payload));
+function uniq(arr: string[]) {
+  return Array.from(new Set(arr));
 }
 
 export async function POST(req: Request) {
@@ -62,6 +37,11 @@ export async function POST(req: Request) {
     const enablePolicy = !!options.enablePolicyCheck;
     const enableTm = !!options.enableTmCheck;
     const issues = body?.issues || null;
+    const continuedStagesInput = Array.isArray(body?.continuedStages)
+      ? body.continuedStages
+      : Array.isArray(body?.stages)
+      ? body.stages
+      : [];
 
     if (!name) {
       return NextResponse.json({ ok: false, error: "row.name is required" }, { status: 400, headers: cors(req) });
@@ -70,6 +50,20 @@ export async function POST(req: Request) {
     const rowHash = buildRowHash({ row, fitType, enableText, enablePolicy, enableTm });
 
     await connectMongo();
+    const existing = await PrecheckRow.findOne({ name }).lean();
+    const cacheMatch = existing?.rowHash === rowHash;
+    const previousStages =
+      cacheMatch && Array.isArray(existing?.continuedStages) ? existing.continuedStages : [];
+    const lastStatusByStage =
+      cacheMatch && existing?.lastStatusByStage ? (existing.lastStatusByStage as Record<string, string>) : {};
+    const warnStages = Object.entries(lastStatusByStage)
+      .filter(([stage, status]) => CONTINUABLE_STAGES.has(stage) && status === "WARN")
+      .map(([stage]) => stage);
+    const continuedStages = uniq([
+      ...previousStages,
+      ...warnStages,
+      ...continuedStagesInput.map((stage: string) => String(stage)),
+    ]);
     await PrecheckRow.updateOne(
       { name },
       {
@@ -77,7 +71,9 @@ export async function POST(req: Request) {
           name,
           rowHash,
           status: "WARN",
-          continued: true,
+          continued: continuedStages.length > 0,
+          continuedStages,
+          lastStatusByStage,
           data: row,
           issues,
           fitType,
