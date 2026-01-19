@@ -6,6 +6,8 @@ const PrecheckRowSchema = new Schema(
     rowHash: { type: String, required: true },
     status: { type: String, required: true },
     continued: { type: Boolean, default: false },
+    continuedStages: { type: [String], default: [] },
+    lastStatusByStage: { type: Schema.Types.Mixed, default: {} },
     data: { type: Schema.Types.Mixed },
     issues: { type: Schema.Types.Mixed },
     fitType: { type: String, default: "none" },

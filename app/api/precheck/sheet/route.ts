@@ -21,6 +21,28 @@ import { buildSuggestionsByWord, extractLiveTextMarks, loadWordData } from "./wo
 
 export const runtime = "nodejs";
 
+const STAGES = {
+  blockWords: "blockWords",
+  warningWords: "warningWords",
+  tmhunt: "tmhunt",
+  geminiPolicy: "geminiPolicy",
+  youthImage: "youthImage",
+} as const;
+
+type StageName = (typeof STAGES)[keyof typeof STAGES];
+type StageStatus = "PASS" | "WARN" | "BLOCK";
+
+function shouldRunStage(
+  stage: StageName,
+  cacheMatch: boolean,
+  continuedStages: Set<string>,
+  lastStatusByStage: Record<string, StageStatus>
+) {
+  if (!cacheMatch) return true;
+  if (continuedStages.has(stage)) return false;
+  return lastStatusByStage?.[stage] !== "PASS";
+}
+
 // -------------------- CORS --------------------
 function cors(req: Request) {
   const origin = req.headers.get("origin") || "*";
@@ -156,8 +178,6 @@ async function computeRankedColorsFromImageUrl(imageUrl: string) {
 
 // -------------------- Main handler --------------------
 export async function POST(req: Request) {
-  
-const now = new Date();
   try {
     const { sheetUrl, enableText, enablePolicy, enableTm, fitType, requiresYouthCheck } =
       await parsePrecheckRequest(req);
@@ -211,160 +231,190 @@ const now = new Date();
       let warningWordGate = false;
       const rowHash = buildRowHash({ row: r, fitType, enableText, enablePolicy, enableTm });
       const cached = cachedByName.get(String(name).trim());
-
-      if (cached && cached.rowHash === rowHash && (cached.status === "PASS" || (cached.status === "WARN" && cached.continued))) {
-        status = cached.status === "WARN" ? "WARN" : "PASS";
-        if (cached.issues) Object.assign(issues, cached.issues);
-        results.push({ index: i, name, status, issues, cache: "HIT", continued: !!cached.continued });
-        rowsReady.push({
-          ...r,
-          rankedColors: [],
-          status,
-          issues,
-          cache: "HIT",
-          continued: !!cached.continued,
-        });
-        continue;
-      }
+      const cacheMatch = !!cached && cached.rowHash === rowHash;
+      const cachedContinuedStages = new Set<string>(
+        cacheMatch && Array.isArray(cached?.continuedStages) ? cached.continuedStages : []
+      );
+      const lastStatusByStage: Record<string, StageStatus> =
+        cacheMatch && cached?.lastStatusByStage ? cached.lastStatusByStage : {};
+      const nextStatusByStage: Record<string, StageStatus> = { ...lastStatusByStage };
 
       // 0) Youth/Girl image check (WARNING)
       if (requiresYouthCheck && r?.image_url) {
-        try {
-          const res = await geminiYouthImageCheck(String(r.image_url), fitType);
-          if (!res?.youth_ok) {
+        if (shouldRunStage(STAGES.youthImage, cacheMatch, cachedContinuedStages, lastStatusByStage)) {
+          try {
+            const res = await geminiYouthImageCheck(String(r.image_url), fitType);
+            if (!res?.youth_ok) {
+              status = "WARN";
+              nextStatusByStage[STAGES.youthImage] = "WARN";
+              issues.youthImage = {
+                issues: Array.isArray(res?.issues) ? res.issues : [],
+                message: "Design may not be suitable for minors. Review before continuing.",
+              };
+            } else {
+              nextStatusByStage[STAGES.youthImage] = "PASS";
+            }
+          } catch (e: any) {
             status = "WARN";
+            nextStatusByStage[STAGES.youthImage] = "WARN";
             issues.youthImage = {
-              issues: Array.isArray(res?.issues) ? res.issues : [],
-              message: "Design may not be suitable for minors. Review before continuing.",
+              issues: [],
+              message: "Youth image check failed (treated as WARNING): " + (e?.message || String(e)),
             };
           }
-        } catch (e: any) {
-          status = "WARN";
-          issues.youthImage = {
-            issues: [],
-            message: "Youth image check failed (treated as WARNING): " + (e?.message || String(e)),
-          };
         }
+      } else if (!requiresYouthCheck) {
+        nextStatusByStage[STAGES.youthImage] = "PASS";
       }
 
       // 1) Block words (hard stop)
       if (enableText) {
-        const blockHits = uniq(block.filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
-        if (blockHits.length) {
-          status = "BLOCK";
-          issues.block = {
-            words: blockHits,
-            suggestionsByWord: await buildSuggestionsByWord(blockHits, blockMap, allowSet),
-            message: "Replace blocked words using suggested safe alternatives.",
-          };
+        if (shouldRunStage(STAGES.blockWords, cacheMatch, cachedContinuedStages, lastStatusByStage)) {
+          const blockHits = uniq(block.filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
+          if (blockHits.length) {
+            status = "BLOCK";
+            nextStatusByStage[STAGES.blockWords] = "BLOCK";
+            issues.block = {
+              words: blockHits,
+              suggestionsByWord: await buildSuggestionsByWord(blockHits, blockMap, allowSet),
+              message: "Replace blocked words using suggested safe alternatives.",
+            };
 
-          await BlockWord.updateMany(
-            { value: { $in: blockHits } },
-            { $set: { lastSeenAt: now }, $inc: { hitCount: 1 } }
-          );
+            await BlockWord.updateMany(
+              { value: { $in: blockHits } },
+              { $set: { lastSeenAt: now }, $inc: { hitCount: 1 } }
+            );
+          } else {
+            nextStatusByStage[STAGES.blockWords] = "PASS";
+          }
         }
 
         // 2) Warning words (soft stop) => gate TMHunt
-        const warnHits = uniq(warn.filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
-        if (warnHits.length) {
-          if (status !== "BLOCK") status = "WARN";
-          warningWordGate = true;
-          issues.warningWords = {
-            words: warnHits,
-            suggestionsByWord: await buildSuggestionsByWord(warnHits, warnMap, allowSet),
-            message: "Warning words found. Review and Continue if acceptable.",
-          };
+        if (shouldRunStage(STAGES.warningWords, cacheMatch, cachedContinuedStages, lastStatusByStage)) {
+          const warnHits = uniq(warn.filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
+          if (warnHits.length) {
+            if (status !== "BLOCK") status = "WARN";
+            warningWordGate = true;
+            nextStatusByStage[STAGES.warningWords] = "WARN";
+            issues.warningWords = {
+              words: warnHits,
+              suggestionsByWord: await buildSuggestionsByWord(warnHits, warnMap, allowSet),
+              message: "Warning words found. Review and Continue if acceptable.",
+            };
 
-          await WarningWord.updateMany(
-            { value: { $in: warnHits } },
-            { $set: { lastSeenAt: now }, $inc: { hitCount: 1 } }
-          );
+            await WarningWord.updateMany(
+              { value: { $in: warnHits } },
+              { $set: { lastSeenAt: now }, $inc: { hitCount: 1 } }
+            );
+          } else {
+            nextStatusByStage[STAGES.warningWords] = "PASS";
+          }
         }
+      } else {
+        nextStatusByStage[STAGES.blockWords] = "PASS";
+        nextStatusByStage[STAGES.warningWords] = "PASS";
       }
 
       // 2) TMHunt => BLOCK (skip when warning-word gate is active)
       if (enableTm && status !== "BLOCK" && !warningWordGate) {
-        try {
-          const tm = await callTMHunt(normalizedText);
-          const liveTextMarks = uniq(extractLiveTextMarks(tm));
-          const filtered = liveTextMarks.filter((m) => !allowSet.has(m) && !warnSet.has(m));
+        if (!shouldRunStage(STAGES.tmhunt, cacheMatch, cachedContinuedStages, lastStatusByStage)) {
+          // already PASS in a previous run
+        } else {
+          try {
+            const tm = await callTMHunt(normalizedText);
+            const liveTextMarks = uniq(extractLiveTextMarks(tm));
+            const filtered = liveTextMarks.filter((m) => !allowSet.has(m) && !warnSet.has(m));
 
-          if (filtered.length) {
-            status = "BLOCK";
-            issues.tmhunt = {
-              liveMarks: filtered,
-              message: "TMHunt found LIVE TEXT marks. Must replace/remove.",
-            };
-            console.log(filtered);
+            if (filtered.length) {
+              status = "BLOCK";
+              nextStatusByStage[STAGES.tmhunt] = "BLOCK";
+              issues.tmhunt = {
+                liveMarks: filtered,
+                message: "TMHunt found LIVE TEXT marks. Must replace/remove.",
+              };
+              console.log(filtered);
 
-            // ✅ FIX: dùng discriminator model (BlockWord) để đảm bảo kind được set đúng
-         await BlockWord.bulkWrite(
-  filtered.map((w) => ({
-    updateOne: {
-      filter: { value: w },
-      update: {
-        // chỉ những field muốn cập nhật mỗi lần hit
-        $set: { lastSeenAt: now },
+              // ✅ FIX: dùng discriminator model (BlockWord) để đảm bảo kind được set đúng
+              await BlockWord.bulkWrite(
+                filtered.map((w) => ({
+                  updateOne: {
+                    filter: { value: w },
+                    update: {
+                      // chỉ những field muốn cập nhật mỗi lần hit
+                      $set: { lastSeenAt: now },
 
-        // chỉ những field set 1 lần khi insert
-        $setOnInsert: {
-          value: w,
-          synonyms: [],
-          source: "tmhunt",
-        },
+                      // chỉ những field set 1 lần khi insert
+                      $setOnInsert: {
+                        value: w,
+                        synonyms: [],
+                        source: "tmhunt",
+                      },
 
-        $inc: { hitCount: 1 },
-      },
-      upsert: true,
-    },
-  })),
-  { ordered: false }
-);
+                      $inc: { hitCount: 1 },
+                    },
+                    upsert: true,
+                  },
+                })),
+                { ordered: false }
+              );
 
+              block = (await BlockWord.find({}).lean()).map((x: any) => norm(x.value)).filter(Boolean);
+            } else {
+              nextStatusByStage[STAGES.tmhunt] = "PASS";
+            }
+          } catch (e: any) {
+            console.log(" TMHunt error:", e.message || e);
 
-
-            block = (await BlockWord.find({}).lean()).map((x: any) => norm(x.value)).filter(Boolean);
+            // TMHunt lỗi thì không tự block, chỉ note
+            issues.tmhuntError = { message: "TMHunt error: " + (e?.message || String(e)) };
           }
-        } catch (e: any) {
-          console.log(" TMHunt error:", e.message || e);
-          
-          // TMHunt lỗi thì không tự block, chỉ note
-          issues.tmhuntError = { message: "TMHunt error: " + (e?.message || String(e)) };
         }
+      } else if (!enableTm) {
+        nextStatusByStage[STAGES.tmhunt] = "PASS";
       }
 
       // 3) Gemini policy => ALWAYS WARNING (independent of warning-word gate)
       if (enablePolicy && status !== "BLOCK") {
-        try {
-          const pr = await geminiPolicyCheck(r);
-          const policyOk = !!pr?.policy_ok;
-          if (!policyOk) {
-            status = "WARN";
+        if (!shouldRunStage(STAGES.geminiPolicy, cacheMatch, cachedContinuedStages, lastStatusByStage)) {
+          // already PASS or continued
+        } else {
+          try {
+            const pr = await geminiPolicyCheck(r);
+            const policyOk = !!pr?.policy_ok;
+            if (!policyOk) {
+              status = "WARN";
+              nextStatusByStage[STAGES.geminiPolicy] = "WARN";
 
-            const policyIssues = Array.isArray(pr?.policy_issues) ? pr.policy_issues : [];
-            issues.geminiPolicy = {
-              issues: policyIssues,
-              highlightsByField: buildHighlightsByField(policyIssues),
-              message: "Gemini flagged policy risks (WARNING). Review and Continue if acceptable.",
-            };
+              const policyIssues = Array.isArray(pr?.policy_issues) ? pr.policy_issues : [];
+              issues.geminiPolicy = {
+                issues: policyIssues,
+                highlightsByField: buildHighlightsByField(policyIssues),
+                message: "Gemini flagged policy risks (WARNING). Review and Continue if acceptable.",
+              };
 
-            // ✅ auto-save to WarningWord (terms preferred, fallback evidence)
-            for (const it of policyIssues) {
-              const terms = Array.isArray(it?.terms) ? it.terms : [];
-              const ev = Array.isArray(it?.evidence) ? it.evidence : [];
-              const arr = (terms.length ? terms : ev).map((x: any) => norm(String(x))).filter(Boolean);
-              for (const t of arr) {
-                if (t && t.length <= 160 && !allowSet.has(t)) geminiToWarn.add(t);
+              // ✅ auto-save to WarningWord (terms preferred, fallback evidence)
+              for (const it of policyIssues) {
+                const terms = Array.isArray(it?.terms) ? it.terms : [];
+                const ev = Array.isArray(it?.evidence) ? it.evidence : [];
+                const arr = (terms.length ? terms : ev).map((x: any) => norm(String(x))).filter(Boolean);
+                for (const t of arr) {
+                  if (t && t.length <= 160 && !allowSet.has(t)) geminiToWarn.add(t);
+                }
               }
+            } else {
+              nextStatusByStage[STAGES.geminiPolicy] = "PASS";
             }
+          } catch (e: any) {
+            status = "WARN";
+            nextStatusByStage[STAGES.geminiPolicy] = "WARN";
+            issues.geminiPolicy = {
+              issues: [],
+              message: "Gemini policy check failed (treated as WARNING): " + (e?.message || String(e)),
+            };
           }
-        } catch (e: any) {
-          status = "WARN";
-          issues.geminiPolicy = {
-            issues: [],
-            message: "Gemini policy check failed (treated as WARNING): " + (e?.message || String(e)),
-          };
         }
+      } else if (!enablePolicy) {
+        nextStatusByStage[STAGES.geminiPolicy] = "PASS";
       }
 
       results.push({ index: i, name, status, issues });
@@ -377,28 +427,34 @@ const now = new Date();
         } catch {
           rankedColors = [];
         }
-        rowsReady.push({ ...r, rankedColors, status, issues, continued: false });
+        rowsReady.push({
+          ...r,
+          rankedColors,
+          status,
+          issues,
+          continued: cachedContinuedStages.size > 0,
+        });
       }
 
-      if (status === "PASS") {
-        await PrecheckRow.updateOne(
-          { name },
-          {
-            $set: {
-              name,
-              rowHash,
-              status: "PASS",
-              continued: false,
-              data: r,
-              issues: null,
-              fitType,
-              options: { enableText, enablePolicy, enableTm },
-              updatedAt: now,
-            },
+      await PrecheckRow.updateOne(
+        { name },
+        {
+          $set: {
+            name,
+            rowHash,
+            status,
+            continued: cachedContinuedStages.size > 0,
+            continuedStages: [...cachedContinuedStages],
+            lastStatusByStage: nextStatusByStage,
+            data: r,
+            issues: Object.keys(issues).length ? issues : null,
+            fitType,
+            options: { enableText, enablePolicy, enableTm },
+            updatedAt: now,
           },
-          { upsert: true }
-        );
-      }
+        },
+        { upsert: true }
+      );
     }
 
     // ✅ FIX: bulk save Gemini -> WarningWord (dùng discriminator model để auto set kind)
