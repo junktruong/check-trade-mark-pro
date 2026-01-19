@@ -1,0 +1,84 @@
+AI Guide cho Backend API (Precheck Flow)
+
+Mục tiêu
+- Làm rõ các điểm backend cần đáp ứng để khớp logic extension.
+- Mô tả các cải tiến cần có cho API precheck/continue.
+
+1) Trạng thái chuẩn
+- Trả về status: PASS | WARN | BLOCK cho từng row.
+- BLOCK là hard stop: không cho tiếp tục.
+- WARN là soft stop: cho phép user chọn “Tiếp tục”.
+
+2) Precheck API (đầu vào/đầu ra)
+Endpoint: POST /api/precheck/sheet
+Body:
+{
+  "sheetUrl": "https://docs.google.com/spreadsheets/d/.../edit#gid=0",
+  "fitType": "youth|girl|none",
+  "options": {
+    "enableTextCheck": true,
+    "enableTmCheck": true,
+    "enablePolicyCheck": true
+  }
+}
+
+Response kỳ vọng:
+- results[]: toàn bộ row, có { index, name, status, issues }
+- rowsReady[]: chỉ PASS/WARN để extension hiển thị + tiếp tục
+- canContinue: true khi có WARN nhưng không có BLOCK
+
+3) Continue API (lưu WARN đã cho phép)
+Endpoint: POST /api/precheck/continue
+Body (ví dụ):
+{
+  "fitType": "youth|girl|none",
+  "options": {
+    "enableTextCheck": true,
+    "enableTmCheck": true,
+    "enablePolicyCheck": true
+  },
+  "row": {
+    "name": "Row 1",
+    "brand": "...",
+    "title": "...",
+    "bullet1": "...",
+    "bullet2": "...",
+    "description": "...",
+    "price": "...",
+    "image_url": "...",
+    "thumbnail_url": "..."
+  }
+}
+
+4) Thiết kế lưu cache theo “vòng”
+- Backend nên lưu stage đã được “continue” (ví dụ: warningWords, geminiPolicy, youthImage).
+- Khi chạy lại:
+  - Nếu row.name + hash giống và stage đã continued => bỏ qua stage đó.
+  - Các stage chưa continued vẫn được chạy.
+  - Ví dụ: đã continue ở warningWords => lần sau bỏ qua warningWords, nhưng vẫn chạy TMHunt/Gemini.
+
+Gợi ý dữ liệu lưu:
+- continuedStages: string[]
+- lastStatusByStage: Record<stage, PASS|WARN|BLOCK>
+
+5) Luồng khi tick tất cả WARNING
+- Nếu tất cả WARNING đã được tick và bấm “Tiếp tục”, backend cần cho phép chạy tiếp các vòng check sau.
+- Ví dụ: warningWords đã continue => tiếp tục chạy Gemini policy.
+- Nếu Gemini policy WARN, tiếp tục trả WARNING cho đến khi user tick hết và bấm “Tiếp tục”.
+- Chỉ khi tất cả stage đã PASS hoặc đã được “Tiếp tục” thì backend mới trả trạng thái OK cho extension chạy tiếp flow chính.
+- Cần ghi nhớ: nếu row đã PASS hoặc đã “Tiếp tục” ở Gemini policy thì lần sau không gọi lại Gemini policy.
+
+6) Batch continue (khuyến nghị)
+- Nên có endpoint nhận danh sách name để bấm “Tiếp tục” một lần.
+- Ví dụ:
+POST /api/precheck/continue/batch
+{
+  "fitType": "...",
+  "options": { ... },
+  "rows": [ { row... }, { row... } ]
+}
+
+7) Mục tiêu cuối
+- Extension chỉ gửi name của row được tiếp tục.
+- Backend lưu lại để bỏ qua vòng warning tương ứng ở lần sau.
+- Đảm bảo các vòng check còn lại vẫn chạy bình thường.
