@@ -287,6 +287,21 @@ export async function POST(req: Request) {
               message: "TMHunt found LIVE TEXT marks. Must replace/remove.",
             };
             filtered.forEach((w) => blockSet.add(w));
+
+            await Word.bulkWrite(
+              filtered.map((w) => ({
+                updateOne: {
+                  filter: { value: w },
+                  update: {
+                    $set: { kind: "BlockWord", lastSeenAt: now },
+                    $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [] },
+                    $inc: { hitCount: 1 },
+                  },
+                  upsert: true,
+                },
+              })),
+              { ordered: false }
+            );
           }
         } catch (e: any) {
           // TMHunt lỗi thì không tự block, chỉ note
