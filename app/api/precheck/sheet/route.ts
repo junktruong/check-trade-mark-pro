@@ -184,7 +184,6 @@ export async function POST(req: Request) {
     const results: any[] = [];
     const rowsReady: any[] = [];
 
-    const tmhuntToBlock = new Set<string>();
     const geminiToWarn = new Set<string>();
     const rowsByName = buildRowsByName(rows);
     const cachedByName = await loadCachedRows(rowsByName);
@@ -285,8 +284,22 @@ export async function POST(req: Request) {
               liveMarks: filtered,
               message: "TMHunt found LIVE TEXT marks. Must replace/remove.",
             };
-            filtered.forEach((w) => tmhuntToBlock.add(w));
             filtered.forEach((w) => blockSet.add(w));
+
+            await Word.bulkWrite(
+              filtered.map((w) => ({
+                updateOne: {
+                  filter: { value: w },
+                  update: {
+                    $set: { kind: "BlockWord", lastSeenAt: now },
+                    $setOnInsert: { value: w, source: "tmhunt", synonyms: [] },
+                    $inc: { hitCount: 1 },
+                  },
+                  upsert: true,
+                },
+              })),
+              { ordered: false }
+            );
           }
         } catch (e: any) {
           // TMHunt lỗi thì không tự block, chỉ note
@@ -360,25 +373,6 @@ export async function POST(req: Request) {
           { upsert: true }
         );
       }
-    }
-
-    // ✅ bulk save TMHunt -> BlockWord
-    if (tmhuntToBlock.size) {
-      const arr = [...tmhuntToBlock];
-      await Word.bulkWrite(
-        arr.map((w) => ({
-          updateOne: {
-            filter: { value: w },
-            update: {
-              $set: { kind: "BlockWord", lastSeenAt: now },
-              $setOnInsert: { value: w, source: "tmhunt", synonyms: [] },
-              $inc: { hitCount: 1 },
-            },
-            upsert: true,
-          },
-        })),
-        { ordered: false }
-      );
     }
 
     // ✅ bulk save Gemini -> WarningWord
