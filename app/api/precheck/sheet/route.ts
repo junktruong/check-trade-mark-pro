@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { WarningWord, BlockWord } from "@/models/Words";
+import { WarningWord, BlockWord, Word } from "@/models/Words";
 import { PrecheckRow } from "@/models/PrecheckRow";
 import { callTMHunt } from "@/lib/tmhunt";
 import { fetchCsvFromSheet, getRowsFromCsv } from "./csv";
