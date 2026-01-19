@@ -272,11 +272,13 @@ export async function POST(req: Request) {
       const cached = await PrecheckCache.findOne({ hash }).lean();
       if (cached && Date.now() - new Date(cached.ts).getTime() <= ttlMs) {
         if (!cached.ok) {
+          console.log("[precheck/batch] cache fail", { step: cached.step, row: { index: i, name } });
           return NextResponse.json(
             { ok: false, step: cached.step, row: { index: i, name }, details: cached.details, cache: "HIT" },
             { headers: cors(req) }
           );
         }
+        console.log("[precheck/batch] cache pass", { row: { index: i, name } });
         continue; // PASS cached
       }
 
@@ -327,8 +329,10 @@ export async function POST(req: Request) {
             { upsert: true }
           );
 
+          console.log("[precheck/batch] step fail", { step: "BLOCKLIST", row: { index: i, name } });
           return NextResponse.json(fail, { headers: cors(req) });
         }
+        console.log("[precheck/batch] step pass", { step: "BLOCKLIST", row: { index: i, name } });
       }
 
       // ===== Step 2: Gemini policy (with evidence + highlightsByField) =====
@@ -365,8 +369,10 @@ export async function POST(req: Request) {
             { upsert: true }
           );
 
+          console.log("[precheck/batch] step fail", { step: "GEMINI_POLICY", row: { index: i, name } });
           return NextResponse.json(fail, { headers: cors(req) });
         }
+        console.log("[precheck/batch] step pass", { step: "GEMINI_POLICY", row: { index: i, name } });
       }
 
       // ===== Step 3: TMHunt (ONLY LIVE + TEXT) + allow filter =====
@@ -395,8 +401,10 @@ export async function POST(req: Request) {
             { upsert: true }
           );
 
+          console.log("[precheck/batch] step fail", { step: "TMHUNT", row: { index: i, name } });
           return NextResponse.json(fail, { headers: cors(req) });
         }
+        console.log("[precheck/batch] step pass", { step: "TMHUNT", row: { index: i, name } });
       }
 
       // PASS => cache ok
@@ -405,6 +413,7 @@ export async function POST(req: Request) {
         { $set: { ok: true, step: "PASS", details: null, ts: new Date() } },
         { upsert: true }
       );
+      console.log("[precheck/batch] row pass", { row: { index: i, name } });
     }
 
     return NextResponse.json({ ok: true, step: "PASS_ALL", cache: "MIX" }, { headers: cors(req) });
