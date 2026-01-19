@@ -195,6 +195,7 @@ export async function POST(req: Request) {
 
       let status: "PASS" | "WARN" | "BLOCK" = "PASS";
       const issues: any = {};
+      let warningGate = false;
       const rowHash = buildRowHash({ row: r, fitType, enableText, enablePolicy, enableTm });
       const cached = cachedByName.get(String(name).trim());
 
@@ -258,6 +259,7 @@ export async function POST(req: Request) {
         const warnHits = uniq(warn.filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
         if (warnHits.length) {
           if (status !== "BLOCK") status = "WARN";
+          warningGate = true;
           issues.warningWords = {
             words: warnHits,
             suggestionsByWord: await buildSuggestionsByWord(warnHits, warnMap, allowSet),
@@ -272,7 +274,7 @@ export async function POST(req: Request) {
       }
 
       // 2) TMHunt => BLOCK
-      if (enableTm && status !== "BLOCK") {
+      if (enableTm && status !== "BLOCK" && !warningGate) {
         try {
           const tm = await callTMHunt(normalizedText);
           const liveTextMarks = uniq(extractLiveTextMarks(tm));
