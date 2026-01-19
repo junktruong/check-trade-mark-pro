@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { connectMongo } from "@/lib/mongo";
-import { AllowWord, BlockWord, Word } from "@/models/Words";
+import { AllowWord, BlockWord } from "@/models/Words";
 import { PrecheckCache } from "@/models/PrecheckCache";
 import { callTMHunt } from "@/lib/tmhunt";
 
@@ -368,7 +368,7 @@ export async function POST(req: Request) {
         }
       }
 
-      // ===== Step 3: TMHunt (ONLY LIVE + TEXT) + allow filter + save blocked =====
+      // ===== Step 3: TMHunt (ONLY LIVE + TEXT) + allow filter =====
       if (enableTm) {
         const tm = await callTMHunt(normalizedText);
 
@@ -377,23 +377,6 @@ export async function POST(req: Request) {
         const filtered = liveMarks.filter((m) => !allowSet.has(m));
 
         if (filtered.length) {
-          // ✅ lưu vào DB (source tmhunt)
-          const now = new Date();
-          await Word.bulkWrite(
-            filtered.map((w) => ({
-              updateOne: {
-                filter: { value: w },
-                update: {
-                  $set: { kind: "BlockWord", lastSeenAt: now },
-                  $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [] },
-                  $inc: { hitCount: 1 },
-                },
-                upsert: true,
-              },
-            })),
-            { ordered: false }
-          );
-
           const fail = {
             ok: false,
             step: "TMHUNT",
