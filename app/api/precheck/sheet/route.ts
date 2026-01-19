@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { WarningWord, BlockWord, Word } from "@/models/Words";
+import { WarningWord, BlockWord } from "@/models/Words";
 import { PrecheckRow } from "@/models/PrecheckRow";
 import { callTMHunt } from "@/lib/tmhunt";
 import { fetchCsvFromSheet, getRowsFromCsv } from "./csv";
@@ -130,7 +130,10 @@ async function computeRankedColorsFromImageUrl(imageUrl: string) {
     .toBuffer({ resolveWithObject: true });
 
   const channels = info?.channels || 4;
-  let r = 0, g = 0, b = 0, n = 0;
+  let r = 0,
+    g = 0,
+    b = 0,
+    n = 0;
 
   for (let i = 0; i < data.length; i += channels) {
     const rr = data[i];
@@ -138,17 +141,26 @@ async function computeRankedColorsFromImageUrl(imageUrl: string) {
     const bb = data[i + 2];
     const aa = channels >= 4 ? data[i + 3] : 255;
     if (aa < 16) continue;
-    r += rr; g += gg; b += bb; n++;
+    r += rr;
+    g += gg;
+    b += bb;
+    n++;
   }
 
-  const dominant = n ? { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n) } : { r: 255, g: 255, b: 255 };
+  const dominant = n
+    ? { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n) }
+    : { r: 255, g: 255, b: 255 };
+
   return rankColors(dominant);
 }
 
 // -------------------- Main handler --------------------
 export async function POST(req: Request) {
+  
+const now = new Date();
   try {
-    const { sheetUrl, enableText, enablePolicy, enableTm, fitType, requiresYouthCheck } = await parsePrecheckRequest(req);
+    const { sheetUrl, enableText, enablePolicy, enableTm, fitType, requiresYouthCheck } =
+      await parsePrecheckRequest(req);
 
     if (!sheetUrl) {
       return NextResponse.json({ ok: false, error: "sheetUrl is empty" }, { status: 400, headers: cors(req) });
@@ -200,11 +212,7 @@ export async function POST(req: Request) {
       const rowHash = buildRowHash({ row: r, fitType, enableText, enablePolicy, enableTm });
       const cached = cachedByName.get(String(name).trim());
 
-      if (
-        cached &&
-        cached.rowHash === rowHash &&
-        (cached.status === "PASS" || (cached.status === "WARN" && cached.continued))
-      ) {
+      if (cached && cached.rowHash === rowHash && (cached.status === "PASS" || (cached.status === "WARN" && cached.continued))) {
         status = cached.status === "WARN" ? "WARN" : "PASS";
         if (cached.issues) Object.assign(issues, cached.issues);
         results.push({ index: i, name, status, issues, cache: "HIT", continued: !!cached.continued });
@@ -287,30 +295,39 @@ export async function POST(req: Request) {
               liveMarks: filtered,
               message: "TMHunt found LIVE TEXT marks. Must replace/remove.",
             };
-            await Word.bulkWrite(
-              filtered.map((w) => ({
-                updateOne: {
-                  filter: { value: w },
-                  update: {
-                    $set: { kind: "BlockWord", lastSeenAt: now },
-                    $setOnInsert: {
-                      kind: "BlockWord",
-                      value: w,
-                      source: "tmhunt",
-                      createdAt: now,
-                      synonyms: [],
-                    },
-                    $inc: { hitCount: 1 },
-                  },
-                  upsert: true,
-                },
-              })),
-              { ordered: false }
-            );
+            console.log(filtered);
+
+            // ✅ FIX: dùng discriminator model (BlockWord) để đảm bảo kind được set đúng
+         await BlockWord.bulkWrite(
+  filtered.map((w) => ({
+    updateOne: {
+      filter: { value: w },
+      update: {
+        // chỉ những field muốn cập nhật mỗi lần hit
+        $set: { lastSeenAt: now },
+
+        // chỉ những field set 1 lần khi insert
+        $setOnInsert: {
+          value: w,
+          synonyms: [],
+          source: "tmhunt",
+        },
+
+        $inc: { hitCount: 1 },
+      },
+      upsert: true,
+    },
+  })),
+  { ordered: false }
+);
+
+
 
             block = (await BlockWord.find({}).lean()).map((x: any) => norm(x.value)).filter(Boolean);
           }
         } catch (e: any) {
+          console.log(" TMHunt error:", e.message || e);
+          
           // TMHunt lỗi thì không tự block, chỉ note
           issues.tmhuntError = { message: "TMHunt error: " + (e?.message || String(e)) };
         }
@@ -384,24 +401,31 @@ export async function POST(req: Request) {
       }
     }
 
-    // ✅ bulk save Gemini -> WarningWord
+    // ✅ FIX: bulk save Gemini -> WarningWord (dùng discriminator model để auto set kind)
     if (geminiToWarn.size) {
       const arr = [...geminiToWarn];
-      await Word.bulkWrite(
-        arr.map((w) => ({
-          updateOne: {
-            filter: { value: w },
-            update: {
-              $set: { kind: "WarningWord", lastSeenAt: now },
-              $setOnInsert: { value: w, source: "gemini_policy", synonyms: [] },
-              $inc: { hitCount: 1 },
-            },
-            upsert: true,
-          },
-        })),
-        { ordered: false }
-      );
-    }
+
+   await WarningWord.bulkWrite(
+  arr.map((w) => ({
+    updateOne: {
+      filter: { value: w },
+      update: {
+        $set: { lastSeenAt: now },
+        $setOnInsert: {
+          value: w,
+          source: "gemini_policy",
+          synonyms: [],
+        },
+        $inc: { hitCount: 1 },
+      },
+      upsert: true,
+    },
+  })),
+  { ordered: false }
+);
+
+
+}
 
     const summary = {
       total: results.length,
@@ -409,10 +433,8 @@ export async function POST(req: Request) {
       warn: results.filter((x) => x.status === "WARN").length,
       block: results.filter((x) => x.status === "BLOCK").length,
     };
-    console.log({
-       
-        "issue" : results[0].issues
-              })
+
+    console.log({ issue: results?.[0]?.issues });
 
     return NextResponse.json(
       {
@@ -420,8 +442,8 @@ export async function POST(req: Request) {
         step: "REPORT",
         summary,
         canContinue: summary.block === 0 && summary.warn > 0,
-        results,    // ✅ tất cả lỗi của tất cả hàng
-        rowsReady,  // ✅ PASS + WARN để extension fill/publish
+        results, // ✅ tất cả lỗi của tất cả hàng
+        rowsReady, // ✅ PASS + WARN để extension fill/publish
       },
       { headers: cors(req) }
     );

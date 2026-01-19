@@ -224,6 +224,7 @@ Rules for evidence:
 }
 
 export async function POST(req: Request) {
+  const now = new Date();
   try {
     const body = await req.json();
     const rows = Array.isArray(body?.rows) ? body.rows : [];
