@@ -385,7 +385,7 @@ export async function POST(req: Request) {
                 filter: { value: w },
                 update: {
                   $set: { kind: "BlockWord", lastSeenAt: now },
-                  $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [], hitCount: 0 },
+                  $setOnInsert: { value: w, source: "tmhunt", createdAt: now, synonyms: [] },
                   $inc: { hitCount: 1 },
                 },
                 upsert: true,

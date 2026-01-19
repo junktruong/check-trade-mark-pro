@@ -369,7 +369,7 @@ export async function POST(req: Request) {
             filter: { value: w },
             update: {
               $set: { kind: "BlockWord", lastSeenAt: now },
-              $setOnInsert: { value: w, source: "tmhunt", synonyms: [], hitCount: 0 },
+              $setOnInsert: { value: w, source: "tmhunt", synonyms: [] },
               $inc: { hitCount: 1 },
             },
             upsert: true,
@@ -388,7 +388,7 @@ export async function POST(req: Request) {
             filter: { value: w },
             update: {
               $set: { kind: "WarningWord", lastSeenAt: now },
-              $setOnInsert: { value: w, source: "gemini_policy", synonyms: [], hitCount: 0 },
+              $setOnInsert: { value: w, source: "gemini_policy", synonyms: [] },
               $inc: { hitCount: 1 },
             },
             upsert: true,
