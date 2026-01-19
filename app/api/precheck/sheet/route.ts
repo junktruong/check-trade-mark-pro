@@ -177,6 +177,7 @@ export async function POST(req: Request) {
     // normalize
     const rows = normalizeRows(rawRows);
     const { allowSet, warn, block, warnMap, blockMap } = await loadWordData();
+    const blockSet = new Set(block);
 
     const now = new Date();
 
@@ -239,7 +240,7 @@ export async function POST(req: Request) {
 
       // 1) Block words (hard stop)
       if (enableText) {
-        const blockHits = uniq(block.filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
+        const blockHits = uniq([...blockSet].filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
         if (blockHits.length) {
           status = "BLOCK";
           issues.block = {
@@ -285,6 +286,7 @@ export async function POST(req: Request) {
               message: "TMHunt found LIVE TEXT marks. Must replace/remove.",
             };
             filtered.forEach((w) => tmhuntToBlock.add(w));
+            filtered.forEach((w) => blockSet.add(w));
           }
         } catch (e: any) {
           // TMHunt lỗi thì không tự block, chỉ note
