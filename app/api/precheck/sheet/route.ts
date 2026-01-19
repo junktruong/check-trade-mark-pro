@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { WarningWord, BlockWord, Word } from "@/models/Words";
+import { WarningWord, BlockWord } from "@/models/Words";
 import { PrecheckRow } from "@/models/PrecheckRow";
 import { callTMHunt } from "@/lib/tmhunt";
 import { fetchCsvFromSheet, getRowsFromCsv } from "./csv";
@@ -184,7 +184,6 @@ export async function POST(req: Request) {
     const results: any[] = [];
     const rowsReady: any[] = [];
 
-    const tmhuntToBlock = new Set<string>();
     const geminiToWarn = new Set<string>();
     const rowsByName = buildRowsByName(rows);
     const cachedByName = await loadCachedRows(rowsByName);
@@ -272,7 +271,7 @@ export async function POST(req: Request) {
         }
       }
 
-      // 2) TMHunt => BLOCK + auto-save BlockWord
+      // 2) TMHunt => BLOCK
       if (enableTm && status !== "BLOCK") {
         try {
           const tm = await callTMHunt(normalizedText);
@@ -285,7 +284,6 @@ export async function POST(req: Request) {
               liveMarks: filtered,
               message: "TMHunt found LIVE TEXT marks. Must replace/remove.",
             };
-            filtered.forEach((w) => tmhuntToBlock.add(w));
             filtered.forEach((w) => blockSet.add(w));
           }
         } catch (e: any) {
@@ -360,25 +358,6 @@ export async function POST(req: Request) {
           { upsert: true }
         );
       }
-    }
-
-    // ✅ bulk save TMHunt -> BlockWord
-    if (tmhuntToBlock.size) {
-      const arr = [...tmhuntToBlock];
-      await Word.bulkWrite(
-        arr.map((w) => ({
-          updateOne: {
-            filter: { value: w },
-            update: {
-              $set: { kind: "BlockWord", lastSeenAt: now },
-              $setOnInsert: { value: w, source: "tmhunt", synonyms: [] },
-              $inc: { hitCount: 1 },
-            },
-            upsert: true,
-          },
-        })),
-        { ordered: false }
-      );
     }
 
     // ✅ bulk save Gemini -> WarningWord
