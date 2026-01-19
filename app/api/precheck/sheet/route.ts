@@ -176,14 +176,15 @@ export async function POST(req: Request) {
 
     // normalize
     const rows = normalizeRows(rawRows);
-    const { allowSet, warn, block, warnMap, blockMap } = await loadWordData();
+    const { allowSet, warn, block: initialBlock, warnMap, blockMap } = await loadWordData();
+    let block = initialBlock;
+    const warnSet = new Set(warn);
 
     const now = new Date();
 
     const results: any[] = [];
     const rowsReady: any[] = [];
 
-    const tmhuntToBlock = new Set<string>();
     const geminiToWarn = new Set<string>();
     const rowsByName = buildRowsByName(rows);
     const cachedByName = await loadCachedRows(rowsByName);
@@ -195,6 +196,7 @@ export async function POST(req: Request) {
 
       let status: "PASS" | "WARN" | "BLOCK" = "PASS";
       const issues: any = {};
+      let warningWordGate = false;
       const rowHash = buildRowHash({ row: r, fitType, enableText, enablePolicy, enableTm });
       const cached = cachedByName.get(String(name).trim());
 
@@ -254,10 +256,11 @@ export async function POST(req: Request) {
           );
         }
 
-        // 2) Warning words (soft stop)
+        // 2) Warning words (soft stop) => gate TMHunt
         const warnHits = uniq(warn.filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
         if (warnHits.length) {
           if (status !== "BLOCK") status = "WARN";
+          warningWordGate = true;
           issues.warningWords = {
             words: warnHits,
             suggestionsByWord: await buildSuggestionsByWord(warnHits, warnMap, allowSet),
@@ -271,12 +274,12 @@ export async function POST(req: Request) {
         }
       }
 
-      // 2) TMHunt => BLOCK + auto-save BlockWord
-      if (enableTm && status !== "BLOCK") {
+      // 2) TMHunt => BLOCK (skip when warning-word gate is active)
+      if (enableTm && status !== "BLOCK" && !warningWordGate) {
         try {
           const tm = await callTMHunt(normalizedText);
           const liveTextMarks = uniq(extractLiveTextMarks(tm));
-          const filtered = liveTextMarks.filter((m) => !allowSet.has(m));
+          const filtered = liveTextMarks.filter((m) => !allowSet.has(m) && !warnSet.has(m));
 
           if (filtered.length) {
             status = "BLOCK";
@@ -284,7 +287,28 @@ export async function POST(req: Request) {
               liveMarks: filtered,
               message: "TMHunt found LIVE TEXT marks. Must replace/remove.",
             };
-            filtered.forEach((w) => tmhuntToBlock.add(w));
+            await Word.bulkWrite(
+              filtered.map((w) => ({
+                updateOne: {
+                  filter: { value: w },
+                  update: {
+                    $set: { kind: "BlockWord", lastSeenAt: now },
+                    $setOnInsert: {
+                      kind: "BlockWord",
+                      value: w,
+                      source: "tmhunt",
+                      createdAt: now,
+                      synonyms: [],
+                    },
+                    $inc: { hitCount: 1 },
+                  },
+                  upsert: true,
+                },
+              })),
+              { ordered: false }
+            );
+
+            block = (await BlockWord.find({}).lean()).map((x: any) => norm(x.value)).filter(Boolean);
           }
         } catch (e: any) {
           // TMHunt lỗi thì không tự block, chỉ note
@@ -292,7 +316,7 @@ export async function POST(req: Request) {
         }
       }
 
-      // 3) Gemini policy => ALWAYS WARNING
+      // 3) Gemini policy => ALWAYS WARNING (independent of warning-word gate)
       if (enablePolicy && status !== "BLOCK") {
         try {
           const pr = await geminiPolicyCheck(r);
@@ -358,25 +382,6 @@ export async function POST(req: Request) {
           { upsert: true }
         );
       }
-    }
-
-    // ✅ bulk save TMHunt -> BlockWord
-    if (tmhuntToBlock.size) {
-      const arr = [...tmhuntToBlock];
-      await Word.bulkWrite(
-        arr.map((w) => ({
-          updateOne: {
-            filter: { value: w },
-            update: {
-              $set: { kind: "BlockWord", lastSeenAt: now },
-              $setOnInsert: { value: w, source: "tmhunt", synonyms: [] },
-              $inc: { hitCount: 1 },
-            },
-            upsert: true,
-          },
-        })),
-        { ordered: false }
-      );
     }
 
     // ✅ bulk save Gemini -> WarningWord
