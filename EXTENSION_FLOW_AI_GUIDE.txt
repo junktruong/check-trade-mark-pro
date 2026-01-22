@@ -1,87 +1,87 @@
-Luồng & Hướng dẫn AI chỉnh sửa extension để khớp server
+  Luồng & Hướng dẫn AI chỉnh sửa extension để khớp server
 
-Mục tiêu
-- Extension gửi đúng dữ liệu cần thiết cho server.
-- Khi gặp BLOCK/WARNING thì trả đúng trạng thái.
-- WARNING có checkbox chọn từng dòng để tiếp tục.
-- Nút “Tiếp tục” gửi danh sách tên (cột name) của các dòng được chọn.
-- Lưu lại danh sách “đã tiếp tục” để lần sau bỏ qua các vòng check tương ứng.
+  Mục tiêu
+  - Extension gửi đúng dữ liệu cần thiết cho server.
+  - Khi gặp BLOCK/WARNING thì trả đúng trạng thái.
+  - WARNING có checkbox chọn từng dòng để tiếp tục.
+  - Nút “Tiếp tục” gửi danh sách tên (cột name) của các dòng được chọn.
+  - Lưu lại danh sách “đã tiếp tục” để lần sau bỏ qua các vòng check tương ứng.
 
-1) Extension gọi precheck (lấy kết quả ban đầu)
-- Endpoint: POST /api/precheck/sheet
-- Body:
-  {
-    "sheetUrl": "https://docs.google.com/spreadsheets/d/.../edit#gid=0",
-    "fitType": "youth|girl|none",
-    "options": {
-      "enableTextCheck": true,
-      "enableTmCheck": true,
-      "enablePolicyCheck": true
+  1) Extension gọi precheck (lấy kết quả ban đầu)
+  - Endpoint: POST /api/precheck/sheet
+  - Body:
+    {
+      "sheetUrl": "https://docs.google.com/spreadsheets/d/.../edit#gid=0",
+      "fitType": "youth|girl|none",
+      "options": {
+        "enableTextCheck": true,
+        "enableTmCheck": true,
+        "enablePolicyCheck": true
+      }
     }
-  }
 
-- Server trả về results[] và rowsReady[] (PASS/WARN) cùng status + issues.
-- Extension hiển thị:
-  - BLOCK: thông báo lỗi và dừng tiếp tục cho dòng đó.
-  - WARNING: hiển thị dòng trong bảng với checkbox chọn (cột name).
-  - PASS: hiển thị bình thường hoặc tự động tiếp tục.
+  - Server trả về results[] và rowsReady[] (PASS/WARN) cùng status + issues.
+  - Extension hiển thị:
+    - BLOCK: thông báo lỗi và dừng tiếp tục cho dòng đó.
+    - WARNING: hiển thị dòng trong bảng với checkbox chọn (cột name).
+    - PASS: hiển thị bình thường hoặc tự động tiếp tục.
 
-2) Khi có WARNING
-- Bảng WARNING có checkbox để chọn từng row.
-- Nút “Tiếp tục” ở dưới cùng.
-- Khi bấm, gửi danh sách tên row được chọn (cột name) lên server để lưu.
+  2) Khi có WARNING
+  - Bảng WARNING có checkbox để chọn từng row.
+  - Nút “Tiếp tục” ở dưới cùng.
+  - Khi bấm, gửi danh sách tên row được chọn (cột name) lên server để lưu.
 
-3) Extension gọi continue (xác nhận WARNING được phép đi tiếp)
-- Endpoint: POST /api/precheck/continue
-- Body (ví dụ):
-  {
-    "fitType": "youth|girl|none",
-    "options": {
-      "enableTextCheck": true,
-      "enableTmCheck": true,
-      "enablePolicyCheck": true
-    },
-    "row": {
-      "name": "Row 1",
-      "brand": "...",
-      "title": "...",
-      "bullet1": "...",
-      "bullet2": "...",
-      "description": "...",
-      "price": "...",
-      "image_url": "...",
-      "thumbnail_url": "..."
+  3) Extension gọi continue (xác nhận WARNING được phép đi tiếp)
+  - Endpoint: POST /api/precheck/continue
+  - Body (ví dụ):
+    {
+      "fitType": "youth|girl|none",
+      "options": {
+        "enableTextCheck": true,
+        "enableTmCheck": true,
+        "enablePolicyCheck": true
+      },
+      "row": {
+        "name": "Row 1",
+        "brand": "...",
+        "title": "...",
+        "bullet1": "...",
+        "bullet2": "...",
+        "description": "...",
+        "price": "...",
+        "image_url": "...",
+        "thumbnail_url": "..."
+      }
     }
-  }
 
-- Extension cần gọi /api/precheck/continue cho từng row đã được chọn.
-- Server lưu “name” của row đã tiếp tục (WARNING continued).
+  - Extension cần gọi /api/precheck/continue cho từng row đã được chọn.
+  - Server lưu “name” của row đã tiếp tục (WARNING continued).
 
-4) Quy tắc bỏ qua khi chạy lại
-- Nếu row.name đã được lưu là “continued” và dữ liệu không đổi:
-  - Bỏ qua các vòng check WARNING trước đó.
-  - Ví dụ: nếu tiếp tục ở vòng WARNING đầu (check text/policy), lần sau không cần gọi lại vòng đó.
-  - Nếu row đã PASS qua Gemini rồi, lần sau không cần gọi Gemini nữa.
-- Mục tiêu: tối ưu thời gian, không lặp lại check không cần thiết.
+  4) Quy tắc bỏ qua khi chạy lại
+  - Nếu row.name đã được lưu là “continued” và dữ liệu không đổi:
+    - Bỏ qua các vòng check WARNING trước đó.
+    - Ví dụ: nếu tiếp tục ở vòng WARNING đầu (check text/policy), lần sau không cần gọi lại vòng đó.
+    - Nếu row đã PASS qua Gemini rồi, lần sau không cần gọi Gemini nữa.
+  - Mục tiêu: tối ưu thời gian, không lặp lại check không cần thiết.
 
-5) Logic gợi ý cho extension
-- Khi nhận results/rowsReady, lưu cache local theo key: name + hash dữ liệu.
-- Khi user bấm “Tiếp tục”, gửi continue và cập nhật cache “continued: true”.
-- Lần sau khi cùng name + hash, bỏ qua hiển thị lại WARNING trước đó.
+  5) Logic gợi ý cho extension
+  - Khi nhận results/rowsReady, lưu cache local theo key: name + hash dữ liệu.
+  - Khi user bấm “Tiếp tục”, gửi continue và cập nhật cache “continued: true”.
+  - Lần sau khi cùng name + hash, bỏ qua hiển thị lại WARNING trước đó.
 
-6) Luồng khi tick tất cả WARNING
-- Nếu tất cả WARNING đã được tick và bấm “Tiếp tục”, extension cần gọi tiếp các vòng check sau.
-- Ví dụ: đã tiếp tục ở warning words => chạy tiếp Gemini policy.
-- Nếu Gemini policy WARN, tiếp tục hiển thị checkbox; user tick hết và bấm “Tiếp tục” thì mới cho chạy tiếp.
-- Khi tất cả vòng check đã PASS hoặc đã được “Tiếp tục”, mới gửi OK cho extension chạy tiếp flow chính.
-- Cần ghi nhớ: nếu row đã PASS hoặc đã “Tiếp tục” ở Gemini policy thì lần sau không gọi lại Gemini policy cho row đó.
+  6) Luồng khi tick tất cả WARNING
+  - Nếu tất cả WARNING đã được tick và bấm “Tiếp tục”, extension cần gọi tiếp các vòng check sau.
+  - Ví dụ: đã tiếp tục ở warning words => chạy tiếp Gemini policy.
+  - Nếu Gemini policy WARN, tiếp tục hiển thị checkbox; user tick hết và bấm “Tiếp tục” thì mới cho chạy tiếp.
+  - Khi tất cả vòng check đã PASS hoặc đã được “Tiếp tục”, mới gửi OK cho extension chạy tiếp flow chính.
+  - Cần ghi nhớ: nếu row đã PASS hoặc đã “Tiếp tục” ở Gemini policy thì lần sau không gọi lại Gemini policy cho row đó.
 
-7) Kỳ vọng UI
-- Bảng kết quả hiển thị status (PASS/WARNING/BLOCK).
-- WARNING có checkbox từng dòng.
-- Nút “Tiếp tục” ở dưới cùng, chỉ gửi các row được chọn.
-- BLOCK không cho chọn, không cho tiếp tục.
+  7) Kỳ vọng UI
+  - Bảng kết quả hiển thị status (PASS/WARNING/BLOCK).
+  - WARNING có checkbox từng dòng.
+  - Nút “Tiếp tục” ở dưới cùng, chỉ gửi các row được chọn.
+  - BLOCK không cho chọn, không cho tiếp tục.
 
-Lưu ý
-- Tên row dùng chính xác giá trị ở cột name.
-- Cần đảm bảo dữ liệu row gửi lên continue đầy đủ các trường cần thiết.
+  Lưu ý
+  - Tên row dùng chính xác giá trị ở cột name.
+  - Cần đảm bảo dữ liệu row gửi lên continue đầy đủ các trường cần thiết.
