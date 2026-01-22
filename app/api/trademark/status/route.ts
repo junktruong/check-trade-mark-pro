@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectMongo } from "@/lib/mongo";
-import { AllowWord, BlockWord, WarningWord } from "@/models/Words";
+import { AllowWord, BlockWord, WarningWord, Word } from "@/models/Words";
 import { callTMHunt } from "@/lib/tmhunt";
 
 function norm(value: unknown) {
@@ -26,6 +26,8 @@ export async function POST(req: Request) {
     const block = (await BlockWord.find({}).lean()).map((x: any) => norm(x.value));
     const warning = (await WarningWord.find({}).lean()).map((x: any) => norm(x.value));
     const allowSet = new Set(allow.filter(Boolean));
+    const blockSet = new Set(block.filter(Boolean));
+    const warningSet = new Set(warning.filter(Boolean));
 
     const blockedWords = uniq(block.filter((w) => w && normalized.includes(w) && !allowSet.has(w)));
     const warningWords = uniq(warning.filter((w) => w && normalized.includes(w) && !allowSet.has(w)));
@@ -41,17 +43,21 @@ export async function POST(req: Request) {
       const liveMarks = uniq(liveMarksRaw.map(norm).filter(Boolean));
       tmhuntWords = liveMarks.filter((m) => !allowSet.has(m));
 
-      if (tmhuntWords.length > 0) {
+      const tmhuntNewWords = tmhuntWords.filter(
+        (value) => !blockSet.has(value) && !warningSet.has(value)
+      );
+
+      if (tmhuntNewWords.length > 0) {
         await Promise.all(
-          tmhuntWords.map((value) =>
-            BlockWord.updateOne(
+          tmhuntNewWords.map((value) =>
+            Word.updateOne(
               { value },
               {
-                $setOnInsert: {
+                $set: {
                   kind: "BlockWord",
-                  value,
                   source: "tmhunt",
                 },
+                $setOnInsert: { value },
               },
               { upsert: true }
             )
