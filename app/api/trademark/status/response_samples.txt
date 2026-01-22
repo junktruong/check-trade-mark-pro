@@ -1,0 +1,46 @@
+API: POST /api/trademark/status
+
+Case: SAFE (no warning, no block, no TMHunt matches)
+{
+  "status": "safe",
+  "warningWords": [],
+  "blockedWords": [],
+  "tmhuntWords": []
+}
+
+Case: WARNING (warning words found, no block)
+{
+  "status": "warning",
+  "warningWords": ["limited", "pro"],
+  "blockedWords": [],
+  "tmhuntWords": []
+}
+
+Case: BLOCK (blocklist hit)
+{
+  "status": "block",
+  "warningWords": [],
+  "blockedWords": ["nintendo"],
+  "tmhuntWords": []
+}
+
+Case: BLOCK (TMHunt live mark)
+{
+  "status": "block",
+  "warningWords": [],
+  "blockedWords": ["starbucks"],
+  "tmhuntWords": ["starbucks"]
+}
+
+Case: BLOCK (blocklist + TMHunt)
+{
+  "status": "block",
+  "warningWords": ["pro"],
+  "blockedWords": ["apple", "coca-cola"],
+  "tmhuntWords": ["coca-cola"]
+}
+
+Case: ERROR (HTTP 500)
+{
+  "error": "TMHunt HTTP 500"
+}
