@@ -1,0 +1,87 @@
+Precheck Sheet Errors API (for Frontend)
+
+Endpoint:
+POST /api/precheck/sheet/errors
+
+Purpose:
+- Chỉ trả về các lỗi (WARN/BLOCK) từ Warning Words, Block Words, TMHunt và Gemini Policy.
+- Không dùng cơ chế continue.
+- Không trả về các row PASS.
+- Gemini Policy trả giải thích tiếng Việt.
+- Giữ nguyên endpoint cũ /api/precheck/sheet để các luồng hiện tại tiếp tục sử dụng.
+
+Request Body:
+{
+  "sheetUrl": "https://docs.google.com/spreadsheets/d/.../edit#gid=0",
+  "fitType": "youth|girl|none",
+  "options": {
+    "enableTextCheck": true,
+    "enableTmCheck": true,
+    "enablePolicyCheck": true
+  }
+}
+
+Response (success):
+{
+  "ok": false,
+  "step": "ERROR_REPORT",
+  "summary": {
+    "total": 2,
+    "warn": 1,
+    "block": 1
+  },
+  "results": [
+    {
+      "index": 0,
+      "name": "Row 1",
+      "status": "BLOCK",
+      "issues": {
+        "block": {
+          "words": ["disney"],
+          "suggestionsByWord": { "disney": ["fantasy", "magic"] },
+          "message": "Replace blocked words using suggested safe alternatives."
+        },
+        "tmhunt": {
+          "liveMarks": ["disney"],
+          "message": "TMHunt found LIVE TEXT marks. Must replace/remove."
+        }
+      }
+    },
+    {
+      "index": 1,
+      "name": "Row 2",
+      "status": "WARN",
+      "issues": {
+        "warningWords": {
+          "words": ["kill"],
+          "suggestionsByWord": { "kill": ["defeat", "stop"] },
+          "message": "Warning words found. Review before proceeding."
+        },
+        "geminiPolicy": {
+          "issues": [
+            {
+              "field": "title",
+              "type": "VIOLENCE",
+              "message": "Nội dung có yếu tố bạo lực.",
+              "fix_suggestion": "Loại bỏ hoặc làm nhẹ yếu tố bạo lực.",
+              "evidence": ["Kill them all"],
+              "terms": ["kill"]
+            }
+          ],
+          "highlightsByField": {
+            "title": ["Kill them all"]
+          },
+          "message": "Gemini flagged policy risks (WARNING). Review before proceeding."
+        }
+      }
+    }
+  ]
+}
+
+Response (no issues):
+{
+  "ok": true,
+  "step": "ERROR_REPORT",
+  "summary": { "total": 0, "warn": 0, "block": 0 },
+  "results": []
+}

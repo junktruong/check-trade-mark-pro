@@ -77,6 +77,85 @@ Return JSON ONLY:
   return JSON.parse(text);
 }
 
+export async function geminiPolicyCheckVi(row: any) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("Server missing GEMINI_API_KEY");
+
+  const model = process.env.GEMINI_TEXT_MODEL || "gemini-2.5-flash-preview-09-2025";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  const prompt = `Bạn là kiểm duyệt viên nghiêm ngặt cho Amazon Merch on Demand.
+Hãy rà soát nội dung listing (Title, Bullets, Description) và đánh dấu BẤT KỲ rủi ro vi phạm nào.
+
+Khu vực cần kiểm tra:
+1) Nội dung vi phạm pháp lý hoặc xâm phạm quyền sở hữu trí tuệ (bản quyền, thương hiệu, danh tiếng/nhân vật).
+2) Nội dung phản cảm/nhạy cảm (thù ghét, bạo lực, tình dục, ma tuý, thảm kịch, ngôn từ xúc phạm).
+3) Nội dung khác không cho phép (kêu gọi review, tuyên bố quyên góp, nói về chất lượng sản phẩm/ship/fulfillment, gây hiểu lầm).
+
+**DỮ LIỆU ĐẦU VÀO:**
+-Brand: ${row.brand || ""}
+-Title: ${row.title || ""}
+-Bullet 1: ${row.bullet1 || ""}
+-Bullet 2: ${row.bullet2 || ""}
+-Description: ${row.description || ""}
+
+Trả về JSON ONLY:
+{
+  "policy_ok": true|false,
+  "policy_issues": [
+    {
+      "field":"brand|title|bullet1|bullet2|description",
+      "type":"IP|ILLEGAL|HATE|VIOLENCE|SEXUAL|PROFANITY|DRUGS|TRAGEDY|MISLEADING|REVIEWS|CHARITY|FULFILLMENT|QUALITY|OTHER",
+      "message":"Giải thích ngắn gọn bằng tiếng Việt.",
+      "fix_suggestion":"Gợi ý sửa bằng tiếng Việt.",
+      "evidence":["trích đoạn vi phạm (nguyên văn)"],
+      "terms":["cụm từ rủi ro (chuẩn hoá)"]
+    }
+  ]
+}`;
+
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "OBJECT",
+        properties: {
+          policy_ok: { type: "BOOLEAN" },
+          policy_issues: {
+            type: "ARRAY",
+            items: {
+              type: "OBJECT",
+              properties: {
+                field: { type: "STRING" },
+                type: { type: "STRING" },
+                message: { type: "STRING" },
+                fix_suggestion: { type: "STRING" },
+                evidence: { type: "ARRAY", items: { type: "STRING" } },
+                terms: { type: "ARRAY", items: { type: "STRING" } },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await res.json();
+  if (!res.ok || data?.error) throw new Error(data?.error?.message || `Gemini HTTP ${res.status}`);
+
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("Gemini returned empty response");
+
+  return JSON.parse(text);
+}
+
 export async function geminiYouthImageCheck(imageUrl: string, fitType: string) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("Server missing GEMINI_API_KEY");
