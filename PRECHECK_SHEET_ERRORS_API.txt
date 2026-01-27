@@ -9,11 +9,20 @@ Purpose:
 - Không trả về các row PASS.
 - Gemini Policy trả giải thích tiếng Việt.
 - Giữ nguyên endpoint cũ /api/precheck/sheet để các luồng hiện tại tiếp tục sử dụng.
+- API này nhận dữ liệu rows trực tiếp (không cần link Google Sheet).
 
 Request Body:
 {
-  "sheetUrl": "https://docs.google.com/spreadsheets/d/.../edit#gid=0",
-  "fitType": "youth|girl|none",
+  "rows": [
+    {
+      "name": "Row 1",
+      "title": "...",
+      "brand": "...",
+      "bullet1": "...",
+      "bullet2": "...",
+      "description": "..."
+    }
+  ],
   "options": {
     "enableTextCheck": true,
     "enableTmCheck": true,

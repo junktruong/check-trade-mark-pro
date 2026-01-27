@@ -1,9 +1,7 @@
 import { NextResponse } from "next/server";
 import { WarningWord, BlockWord } from "@/models/Words";
 import { callTMHunt } from "@/lib/tmhunt";
-import { fetchCsvFromSheet, getRowsFromCsv } from "../csv";
 import { geminiPolicyCheckVi, buildHighlightsByField } from "../gemini";
-import { parsePrecheckRequest } from "../request";
 import {
   buildText,
   cleanRowObject,
@@ -35,30 +33,25 @@ export async function OPTIONS(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const { sheetUrl, enableText, enablePolicy, enableTm } = await parsePrecheckRequest(req);
+    const body = await req.json().catch(() => ({}));
+    const options = body?.options || {};
+    const enableText = !!options.enableTextCheck;
+    const enablePolicy = !!options.enablePolicyCheck;
+    const enableTm = !!options.enableTmCheck;
+    const inputRows = Array.isArray(body?.rows) ? body.rows : [];
 
-    if (!sheetUrl) {
-      return NextResponse.json({ ok: false, error: "sheetUrl is empty" }, { status: 400, headers: cors(req) });
+    if (!inputRows.length) {
+      return NextResponse.json({ ok: false, error: "rows is empty" }, { status: 400, headers: cors(req) });
     }
 
-    let csvText = "";
-    try {
-      csvText = await fetchCsvFromSheet(sheetUrl);
-    } catch (e: any) {
-      return NextResponse.json(
-        { ok: false, error: e?.message || String(e) },
-        { status: e?.message?.startsWith("Fetch CSV failed") ? 502 : 400, headers: cors(req) }
-      );
-    }
-
-    const rawRows = getRowsFromCsv(csvText)
+    const rawRows = inputRows
       .map(cleanRowObject)
       .filter((r) => !isTrulyEmptyRow(r))
       .filter((r) => !looksLikeHeaderRow(r))
       .filter((r) => isUsableRow(r));
 
     if (!rawRows.length) {
-      return NextResponse.json({ ok: false, error: "Google Sheet has no usable rows" }, { status: 400, headers: cors(req) });
+      return NextResponse.json({ ok: false, error: "rows has no usable items" }, { status: 400, headers: cors(req) });
     }
 
     const rows = normalizeRows(rawRows);
