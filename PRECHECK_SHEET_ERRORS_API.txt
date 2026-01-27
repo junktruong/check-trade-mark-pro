@@ -11,6 +11,9 @@ Purpose:
 - Giữ nguyên endpoint cũ /api/precheck/sheet để các luồng hiện tại tiếp tục sử dụng.
 - API này nhận dữ liệu rows trực tiếp (không cần link Google Sheet).
 
+Endpoint:
+POST /api/precheck/sheet/errors
+
 Request Body:
 {
   "rows": [

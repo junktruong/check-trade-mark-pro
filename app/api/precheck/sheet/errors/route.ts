@@ -13,6 +13,7 @@ import {
   uniq,
 } from "../rows";
 import { buildSuggestionsByWord, extractLiveTextMarks, loadWordData } from "../words";
+import { log } from "console";
 
 export const runtime = "nodejs";
 
@@ -33,6 +34,7 @@ export async function OPTIONS(req: Request) {
 
 export async function POST(req: Request) {
   try {
+    log("[precheck/sheet/errors] request:start");
     const body = await req.json().catch(() => ({}));
     const options = body?.options || {};
     const enableText = !!options.enableTextCheck;
@@ -40,22 +42,42 @@ export async function POST(req: Request) {
     const enableTm = !!options.enableTmCheck;
     const inputRows = Array.isArray(body?.rows) ? body.rows : [];
 
+    log("[precheck/sheet/errors] request:options", {
+      enableText,
+      enablePolicy,
+      enableTm,
+      rowsCount: inputRows.length,
+    });
+
     if (!inputRows.length) {
+      log("[precheck/sheet/errors] request:invalid", { reason: "rows is empty" });
       return NextResponse.json({ ok: false, error: "rows is empty" }, { status: 400, headers: cors(req) });
     }
 
     const rawRows = inputRows
       .map(cleanRowObject)
-      .filter((r) => !isTrulyEmptyRow(r))
-      .filter((r) => !looksLikeHeaderRow(r))
-      .filter((r) => isUsableRow(r));
+      .filter((r:any) => !isTrulyEmptyRow(r))
+      .filter((r:any) => !looksLikeHeaderRow(r))
+      .filter((r:any) => isUsableRow(r));
+
+    log("[precheck/sheet/errors] rows:filtered", {
+      input: inputRows.length,
+      raw: rawRows.length,
+    });
 
     if (!rawRows.length) {
+      log("[precheck/sheet/errors] request:invalid", { reason: "rows has no usable items" });
       return NextResponse.json({ ok: false, error: "rows has no usable items" }, { status: 400, headers: cors(req) });
     }
 
     const rows = normalizeRows(rawRows);
+    log("[precheck/sheet/errors] rows:normalized", { count: rows.length });
     const { allowSet, warn, block, warnMap, blockMap } = await loadWordData();
+    log("[precheck/sheet/errors] words:loaded", {
+      allow: allowSet.size,
+      warn: warn.length,
+      block: block.length,
+    });
     const warnSet = new Set(warn);
     const now = new Date();
 
@@ -68,6 +90,7 @@ export async function POST(req: Request) {
 
       let status: "PASS" | "WARN" | "BLOCK" = "PASS";
       const issues: any = {};
+      log("[precheck/sheet/errors] row:start", { index: i, name });
 
       if (enableText) {
         const blockHits = uniq(block.filter((w) => w && normalizedText.includes(w) && !allowSet.has(w)));
@@ -78,6 +101,8 @@ export async function POST(req: Request) {
             suggestionsByWord: await buildSuggestionsByWord(blockHits, blockMap, allowSet),
             message: "Replace blocked words using suggested safe alternatives.",
           };
+
+          log("[precheck/sheet/errors] row:blockHits", { index: i, name, count: blockHits.length });
 
           await BlockWord.updateMany(
             { value: { $in: blockHits } },
@@ -93,6 +118,8 @@ export async function POST(req: Request) {
             suggestionsByWord: await buildSuggestionsByWord(warnHits, warnMap, allowSet),
             message: "Warning words found. Review before proceeding.",
           };
+
+          log("[precheck/sheet/errors] row:warnHits", { index: i, name, count: warnHits.length });
 
           await WarningWord.updateMany(
             { value: { $in: warnHits } },
@@ -113,6 +140,8 @@ export async function POST(req: Request) {
               liveMarks: filtered,
               message: "TMHunt found LIVE TEXT marks. Must replace/remove.",
             };
+
+            log("[precheck/sheet/errors] row:tmhuntHits", { index: i, name, count: filtered.length });
 
             await BlockWord.bulkWrite(
               filtered.map((w) => ({
@@ -135,6 +164,7 @@ export async function POST(req: Request) {
           }
         } catch (e: any) {
           issues.tmhuntError = { message: "TMHunt error: " + (e?.message || String(e)) };
+          log("[precheck/sheet/errors] row:tmhuntError", { index: i, name, error: e?.message || String(e) });
         }
       }
 
@@ -150,6 +180,8 @@ export async function POST(req: Request) {
               highlightsByField: buildHighlightsByField(policyIssues),
               message: "Gemini flagged policy risks (WARNING). Review before proceeding.",
             };
+
+            log("[precheck/sheet/errors] row:policyWarn", { index: i, name, count: policyIssues.length });
           }
         } catch (e: any) {
           if (status !== "BLOCK") status = "WARN";
@@ -157,12 +189,15 @@ export async function POST(req: Request) {
             issues: [],
             message: "Gemini policy check failed (treated as WARNING): " + (e?.message || String(e)),
           };
+          log("[precheck/sheet/errors] row:policyError", { index: i, name, error: e?.message || String(e) });
         }
       }
 
       if (status !== "PASS") {
         results.push({ index: i, name, status, issues });
       }
+
+      log("[precheck/sheet/errors] row:end", { index: i, name, status });
     }
 
     const summary = {
@@ -170,6 +205,9 @@ export async function POST(req: Request) {
       warn: results.filter((x) => x.status === "WARN").length,
       block: results.filter((x) => x.status === "BLOCK").length,
     };
+
+    log("[precheck/sheet/errors] summary", summary);
+    log("[precheck/sheet/errors] results", results);
 
     return NextResponse.json(
       {
@@ -181,6 +219,7 @@ export async function POST(req: Request) {
       { headers: cors(req) }
     );
   } catch (e: any) {
+    log("[precheck/sheet/errors] request:error", { error: e?.message || String(e) });
     return NextResponse.json({ ok: false, error: e?.message || String(e) }, { status: 500, headers: cors(req) });
   }
 }
