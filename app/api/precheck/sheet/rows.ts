@@ -95,6 +95,9 @@ export function normalizeRows(rawRows: any[]) {
       price: String(r?.price || ""),
       image_url: String(fullUrl || ""),
       thumbnail_url: String(thumbUrl || ""),
+      type: String(r?.type || ""),
+      area: String(r?.area || ""),
+      ["youth/girl"]: String(r?.["youth/girl"] || r?.youth_girl || r?.youth || r?.girl || ""),
     };
   });
 }
