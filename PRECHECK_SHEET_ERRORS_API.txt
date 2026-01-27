@@ -9,23 +9,14 @@ Purpose:
 - Không trả về các row PASS.
 - Gemini Policy trả giải thích tiếng Việt.
 - Giữ nguyên endpoint cũ /api/precheck/sheet để các luồng hiện tại tiếp tục sử dụng.
-- API này nhận dữ liệu rows trực tiếp (không cần link Google Sheet).
+- API này nhận link Google Sheet.
 
 Endpoint:
 POST /api/precheck/sheet/errors
 
 Request Body:
 {
-  "rows": [
-    {
-      "name": "Row 1",
-      "title": "...",
-      "brand": "...",
-      "bullet1": "...",
-      "bullet2": "...",
-      "description": "..."
-    }
-  ],
+  "sheetUrl": "https://docs.google.com/spreadsheets/d/.../edit#gid=0",
   "options": {
     "enableTextCheck": true,
     "enableTmCheck": true,
@@ -46,6 +37,17 @@ Response (success):
     {
       "index": 0,
       "name": "Row 1",
+      "title": "...",
+      "brand": "...",
+      "bullet1": "...",
+      "bullet2": "...",
+      "description": "...",
+      "image_url": "...",
+      "thumbnail_url": "...",
+      "price": "...",
+      "type": "...",
+      "area": "...",
+      "youth/girl": "...",
       "status": "BLOCK",
       "issues": {
         "block": {
@@ -62,6 +64,17 @@ Response (success):
     {
       "index": 1,
       "name": "Row 2",
+      "title": "...",
+      "brand": "...",
+      "bullet1": "...",
+      "bullet2": "...",
+      "description": "...",
+      "image_url": "...",
+      "thumbnail_url": "...",
+      "price": "...",
+      "type": "...",
+      "area": "...",
+      "youth/girl": "...",
       "status": "WARN",
       "issues": {
         "warningWords": {
