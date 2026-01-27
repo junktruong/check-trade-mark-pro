@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { WarningWord, BlockWord } from "@/models/Words";
 import { callTMHunt } from "@/lib/tmhunt";
 import { geminiPolicyCheckVi, buildHighlightsByField } from "../gemini";
+import { fetchCsvFromSheet, getRowsFromCsv } from "../csv";
 import {
   buildText,
   cleanRowObject,
@@ -40,18 +41,30 @@ export async function POST(req: Request) {
     const enableText = !!options.enableTextCheck;
     const enablePolicy = !!options.enablePolicyCheck;
     const enableTm = !!options.enableTmCheck;
-    const inputRows = Array.isArray(body?.rows) ? body.rows : [];
+    const sheetUrl = String(body?.sheetUrl || "").trim();
+    let inputRows: any[] = [];
 
     log("[precheck/sheet/errors] request:options", {
       enableText,
       enablePolicy,
       enableTm,
-      rowsCount: inputRows.length,
+      sheetUrlProvided: !!sheetUrl,
     });
 
-    if (!inputRows.length) {
-      log("[precheck/sheet/errors] request:invalid", { reason: "rows is empty" });
-      return NextResponse.json({ ok: false, error: "rows is empty" }, { status: 400, headers: cors(req) });
+    if (!sheetUrl) {
+      log("[precheck/sheet/errors] request:invalid", { reason: "sheetUrl is empty" });
+      return NextResponse.json({ ok: false, error: "sheetUrl is empty" }, { status: 400, headers: cors(req) });
+    }
+
+    try {
+      const csvText = await fetchCsvFromSheet(sheetUrl);
+      inputRows = getRowsFromCsv(csvText);
+    } catch (e: any) {
+      log("[precheck/sheet/errors] request:invalid", { reason: e?.message || String(e) });
+      return NextResponse.json(
+        { ok: false, error: e?.message || String(e) },
+        { status: e?.message?.startsWith("Fetch CSV failed") ? 502 : 400, headers: cors(req) }
+      );
     }
 
     const rawRows = inputRows
@@ -194,7 +207,7 @@ export async function POST(req: Request) {
       }
 
       if (status !== "PASS") {
-        results.push({ index: i, name, status, issues });
+        results.push({ index: i, name, status, issues, ...r });
       }
 
       log("[precheck/sheet/errors] row:end", { index: i, name, status });
